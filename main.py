@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 
 import cv2
 import numpy as np
@@ -31,6 +32,29 @@ IMAGE_EXTENSIONS = (
     ".bmp",
     ".webp"
 )
+
+
+def configure_windows_dpi_awareness():
+
+    if not sys.platform.startswith("win"):
+        return
+
+    try:
+
+        import ctypes
+
+        try:
+
+            # Per-monitor DPI aware for accurate geometry on multi-screen setups.
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)
+
+        except Exception:
+
+            ctypes.windll.user32.SetProcessDPIAware()
+
+    except Exception:
+
+        pass
 
 
 class Face:
@@ -61,8 +85,13 @@ class Face:
 
         self.video = None
         self.video_frame = None
+        self.first_video_frame = None
 
         self.photo = None
+
+        self.cached_warp_key = None
+        self.cached_warped = None
+        self.cached_mask = None
 
         self.is_video = False
 
@@ -78,6 +107,11 @@ class Face:
 
         self.image = None
         self.video_frame = None
+        self.first_video_frame = None
+
+        self.cached_warp_key = None
+        self.cached_warped = None
+        self.cached_mask = None
 
         if not self.filename:
             return
@@ -129,6 +163,10 @@ class Face:
 
                     self.read_video_frame()
 
+                    if self.video_frame is not None:
+
+                        self.first_video_frame = self.video_frame.copy()
+
             except Exception as e:
 
                 print(
@@ -165,11 +203,49 @@ class Face:
 
         return None
 
-    def get_current_frame(self):
+    def get_first_video_frame(self):
+
+        if not self.is_video or self.video is None:
+            return None
+
+        if self.first_video_frame is not None:
+            return self.first_video_frame
+
+        current_position = self.video.get(
+            cv2.CAP_PROP_POS_FRAMES
+        )
+
+        self.video.set(
+            cv2.CAP_PROP_POS_FRAMES,
+            0
+        )
+
+        ret, frame = self.video.read()
+
+        self.video.set(
+            cv2.CAP_PROP_POS_FRAMES,
+            current_position
+        )
+
+        if ret:
+
+            self.first_video_frame = frame
+
+            return frame
+
+        return None
+
+    def get_current_frame(
+        self,
+        playback=False
+    ):
 
         if self.is_video:
 
-            return self.read_video_frame()
+            if playback:
+                return self.read_video_frame()
+
+            return self.get_first_video_frame()
 
         return self.image
 
@@ -181,6 +257,11 @@ class Face:
 
         self.video = None
         self.video_frame = None
+        self.first_video_frame = None
+
+        self.cached_warp_key = None
+        self.cached_warped = None
+        self.cached_mask = None
 
 
 class Scene:
@@ -188,11 +269,15 @@ class Scene:
     def __init__(
         self,
         name="Escena 1",
-        screen_index=0
+        screen_index=0,
+        space_width=None,
+        space_height=None
     ):
 
         self.name = name
         self.screen_index = screen_index
+        self.space_width = space_width
+        self.space_height = space_height
         self.faces = []
 
 
@@ -544,6 +629,156 @@ class VideoMapper:
             screen_index
         ]
 
+    def get_target_scene_space(
+        self,
+        scene=None
+    ):
+
+        if scene is None:
+            scene = self.current_scene
+
+        if scene is not None and self.available_screens:
+
+            screen = self.get_screen(
+                scene.screen_index
+            )
+
+            width = int(
+                screen.get(
+                    "width",
+                    0
+                )
+            )
+
+            height = int(
+                screen.get(
+                    "height",
+                    0
+                )
+            )
+
+            if width > 1 and height > 1:
+                return width, height
+
+        width = int(self.canvas_width)
+        height = int(self.canvas_height)
+
+        if width <= 1:
+            width = 1280
+
+        if height <= 1:
+            height = 720
+
+        return width, height
+
+    def rescale_scene_faces(
+        self,
+        scene,
+        source_width,
+        source_height,
+        target_width,
+        target_height
+    ):
+
+        if scene is None:
+            return False
+
+        if (
+            source_width <= 1
+            or source_height <= 1
+            or target_width <= 1
+            or target_height <= 1
+        ):
+            return False
+
+        sx = target_width / source_width
+        sy = target_height / source_height
+
+        if abs(sx - 1.0) < 1e-9 and abs(sy - 1.0) < 1e-9:
+            scene.space_width = target_width
+            scene.space_height = target_height
+            return False
+
+        for face in scene.faces:
+
+            scaled_points = []
+
+            for x, y in face.points:
+
+                scaled_points.append([
+                    int(round(x * sx)),
+                    int(round(y * sy))
+                ])
+
+            face.points = scaled_points
+
+        scene.space_width = target_width
+        scene.space_height = target_height
+
+        return True
+
+    def adapt_scene_to_assigned_screen(
+        self,
+        scene,
+        source_width=None,
+        source_height=None,
+        force=False
+    ):
+
+        if scene is None:
+            return False
+
+        target_width, target_height = self.get_target_scene_space(
+            scene
+        )
+
+        if source_width is None or source_height is None:
+
+            source_width = int(
+                scene.space_width
+                if scene.space_width is not None
+                else 0
+            )
+
+            source_height = int(
+                scene.space_height
+                if scene.space_height is not None
+                else 0
+            )
+
+        source_width = int(source_width)
+        source_height = int(source_height)
+
+        if source_width <= 1 or source_height <= 1:
+
+            source_width = int(self.canvas_width)
+            source_height = int(self.canvas_height)
+
+        if source_width <= 1 or source_height <= 1:
+
+            source_width, source_height = (
+                target_width,
+                target_height
+            )
+
+        if (
+            not force
+            and source_width == target_width
+            and source_height == target_height
+        ):
+
+            scene.space_width = target_width
+            scene.space_height = target_height
+            return False
+
+        return self.rescale_scene_faces(
+            scene,
+            source_width,
+            source_height,
+            target_width,
+            target_height
+        )
+
     def build_screen_geometry(
         self,
         screen
@@ -758,6 +993,16 @@ class VideoMapper:
             self.top,
             text="Asociar",
             command=self.assign_selected_screen
+        ).pack(
+            side="left",
+            padx=4,
+            pady=5
+        )
+
+        tk.Button(
+            self.top,
+            text="Reescalar",
+            command=self.rescale_current_scene
         ).pack(
             side="left",
             padx=4,
@@ -1561,6 +1806,10 @@ class VideoMapper:
 
         scene = Scene(name)
 
+        scene.space_width, scene.space_height = self.get_target_scene_space(
+            scene
+        )
+
         self.scenes.append(
             scene
         )
@@ -1778,6 +2027,21 @@ class VideoMapper:
             scene
         )
 
+        self.current_scene = scene
+
+        changed = self.adapt_scene_to_assigned_screen(
+            scene
+        )
+
+        if changed:
+
+            self.save_project(
+                notify=False
+            )
+
+        self.update_scene_label()
+        self.redraw()
+
     def edit_selected_scene(self):
 
         if self.is_execution_mode():
@@ -1792,6 +2056,16 @@ class VideoMapper:
             return
 
         self.current_scene = scene
+
+        changed = self.adapt_scene_to_assigned_screen(
+            scene
+        )
+
+        if changed:
+
+            self.save_project(
+                notify=False
+            )
 
         self.selected_face = None
         self.selected_corner = None
@@ -1826,7 +2100,22 @@ class VideoMapper:
         if screen_index < 0:
             screen_index = 0
 
+        previous_width, previous_height = self.get_scene_space(
+            scene
+        )
+
         scene.screen_index = screen_index
+
+        self.adapt_scene_to_assigned_screen(
+            scene,
+            source_width=previous_width,
+            source_height=previous_height,
+            force=True
+        )
+
+        self.normalize_scene_videos(
+            scene
+        )
 
         self.update_screen_combo_selection(
             scene
@@ -1835,6 +2124,12 @@ class VideoMapper:
         if scene == self.current_scene:
 
             self.update_scene_label()
+
+        self.redraw()
+
+        self.save_project(
+            notify=False
+        )
 
         if scene in self.player_windows:
 
@@ -1866,9 +2161,159 @@ class VideoMapper:
     # CARAS
     # =========================================================
 
+    def normalize_video_for_scene(
+        self,
+        source_path,
+        scene
+    ):
+
+        if not source_path or scene is None:
+            return source_path
+
+        extension = os.path.splitext(
+            source_path
+        )[1].lower()
+
+        if extension not in VIDEO_EXTENSIONS:
+            return source_path
+
+        _, max_height = self.get_target_scene_space(
+            scene
+        )
+
+        capture = cv2.VideoCapture(
+            source_path
+        )
+
+        if not capture.isOpened():
+            capture.release()
+            return source_path
+
+        source_width = int(
+            capture.get(cv2.CAP_PROP_FRAME_WIDTH)
+        )
+        source_height = int(
+            capture.get(cv2.CAP_PROP_FRAME_HEIGHT)
+        )
+
+        if (
+            source_width <= 0
+            or source_height <= 0
+            or source_height <= max_height
+        ):
+            capture.release()
+            return source_path
+
+        scale = max_height / source_height
+        target_width = max(
+            int(round(source_width * scale)),
+            2
+        )
+        target_width += target_width % 2
+        target_height = max_height - (max_height % 2)
+
+        fps = capture.get(
+            cv2.CAP_PROP_FPS
+        )
+
+        if fps <= 0:
+            fps = 30.0
+
+        base_name = os.path.splitext(
+            os.path.basename(source_path)
+        )[0]
+
+        normalized_path = os.path.join(
+            self.current_assets_dir,
+            f"{base_name}_h{target_height}.mp4"
+        )
+
+        if os.path.abspath(normalized_path) == os.path.abspath(source_path):
+            normalized_path = os.path.join(
+                self.current_assets_dir,
+                f"{base_name}_scaled.mp4"
+            )
+
+        writer = cv2.VideoWriter(
+            normalized_path,
+            cv2.VideoWriter_fourcc(*"mp4v"),
+            fps,
+            (
+                target_width,
+                target_height
+            )
+        )
+
+        if not writer.isOpened():
+            capture.release()
+            writer.release()
+            return source_path
+
+        try:
+
+            while True:
+
+                ok, frame = capture.read()
+
+                if not ok:
+                    break
+
+                resized = cv2.resize(
+                    frame,
+                    (
+                        target_width,
+                        target_height
+                    ),
+                    interpolation=cv2.INTER_AREA
+                )
+
+                writer.write(
+                    resized
+                )
+
+        finally:
+
+            capture.release()
+            writer.release()
+
+        if not os.path.isfile(normalized_path):
+            return source_path
+
+        print(
+            f"Video optimizado: {source_width}x{source_height} -> "
+            f"{target_width}x{target_height}"
+        )
+
+        return normalized_path
+
+    def normalize_scene_videos(
+        self,
+        scene
+    ):
+
+        changed = False
+
+        for face in scene.faces:
+
+            normalized_path = self.normalize_video_for_scene(
+                face.filename,
+                scene
+            )
+
+            if normalized_path == face.filename:
+                continue
+
+            face.close_video()
+            face.filename = normalized_path
+            face.load_file()
+            changed = True
+
+        return changed
+
     def save_source_file_to_assets(
         self,
-        source_path
+        source_path,
+        scene=None
     ):
 
         if not source_path:
@@ -1902,11 +2347,15 @@ class VideoMapper:
             target_path
         )
 
-        return target_path
+        return self.normalize_video_for_scene(
+            target_path,
+            scene
+        )
 
     def save_uploaded_file_to_assets(
         self,
-        uploaded
+        uploaded,
+        scene=None
     ):
 
         if uploaded is None:
@@ -1939,7 +2388,10 @@ class VideoMapper:
             path
         )
 
-        return path
+        return self.normalize_video_for_scene(
+            path,
+            scene
+        )
 
     def add_face(self):
 
@@ -2035,7 +2487,8 @@ class VideoMapper:
         try:
 
             stored_path = self.save_source_file_to_assets(
-                filename
+                filename,
+                self.current_scene
             )
 
         except Exception as e:
@@ -2178,11 +2631,17 @@ class VideoMapper:
     # OBTENER FRAME
     # =========================================================
 
-    def get_face_frame(self, face):
+    def get_face_frame(
+        self,
+        face,
+        playback=False
+    ):
 
         if face.is_video:
 
-            frame = face.get_current_frame()
+            frame = face.get_current_frame(
+                playback=playback
+            )
 
         else:
 
@@ -2241,7 +2700,8 @@ class VideoMapper:
         self,
         width,
         height,
-        scene=None
+        scene=None,
+        playback=False
     ):
 
         output = np.zeros(
@@ -2260,14 +2720,9 @@ class VideoMapper:
         if scene is None:
             return output
 
-        editor_width = self.canvas_width
-        editor_height = self.canvas_height
-
-        if editor_width <= 1:
-            editor_width = width
-
-        if editor_height <= 1:
-            editor_height = height
+        editor_width, editor_height = self.get_scene_space(
+            scene
+        )
 
         sx = width / editor_width
         sy = height / editor_height
@@ -2275,7 +2730,8 @@ class VideoMapper:
         for face in scene.faces:
 
             frame = self.get_face_frame(
-                face
+                face,
+                playback=playback
             )
 
             if frame is None:
@@ -2312,45 +2768,181 @@ class VideoMapper:
                 ]
             ])
 
-            matrix = cv2.getPerspectiveTransform(
-                source_points,
-                destination_points
+            # Cachea caras estáticas para evitar recalcular perspectiva cada frame.
+            can_cache = (
+                (not face.is_video)
+                or
+                (face.is_video and not playback)
             )
 
-            warped = cv2.warpPerspective(
-                frame,
-                matrix,
-                (
-                    width,
-                    height
+            destination_key = tuple(
+                tuple(
+                    round(float(value), 3)
+                    for value in point
                 )
+                for point in destination_points
             )
 
-            mask = np.zeros(
-                (
-                    height,
-                    width
-                ),
-                dtype=np.uint8
+            cache_key = (
+                width,
+                height,
+                face.filename,
+                face.flip_x,
+                face.flip_y,
+                face.rotation_degrees,
+                face.is_video,
+                playback,
+                destination_key
             )
 
-            polygon = np.int32(
-                destination_points
-            )
+            if (
+                can_cache
+                and face.cached_warp_key == cache_key
+                and face.cached_warped is not None
+                and face.cached_mask is not None
+            ):
 
-            cv2.fillConvexPoly(
-                mask,
-                polygon,
-                255
-            )
+                warped = face.cached_warped
+                mask = face.cached_mask
+
+            else:
+
+                matrix = cv2.getPerspectiveTransform(
+                    source_points,
+                    destination_points
+                )
+
+                warped = cv2.warpPerspective(
+                    frame,
+                    matrix,
+                    (
+                        width,
+                        height
+                    )
+                )
+
+                mask = np.zeros(
+                    (
+                        height,
+                        width
+                    ),
+                    dtype=np.uint8
+                )
+
+                polygon = np.int32(
+                    destination_points
+                )
+
+                cv2.fillConvexPoly(
+                    mask,
+                    polygon,
+                    255
+                )
+
+                mask = mask == 255
+
+                if can_cache:
+
+                    face.cached_warp_key = cache_key
+                    face.cached_warped = warped
+                    face.cached_mask = mask
 
             output[
-                mask == 255
+                mask
             ] = warped[
-                mask == 255
+                mask
             ]
 
         return output
+
+    def get_scene_space(
+        self,
+        scene=None
+    ):
+
+        if scene is None:
+
+            scene = self.current_scene
+
+        if scene is not None:
+
+            return self.get_target_scene_space(
+                scene
+            )
+
+        width = int(self.canvas_width)
+        height = int(self.canvas_height)
+
+        if width <= 1:
+            width = 1280
+
+        if height <= 1:
+            height = 720
+
+        return width, height
+
+    def get_editor_transform(
+        self,
+        scene=None
+    ):
+
+        scene_width, scene_height = self.get_scene_space(
+            scene
+        )
+
+        canvas_width = max(
+            int(self.canvas_width),
+            1
+        )
+
+        canvas_height = max(
+            int(self.canvas_height),
+            1
+        )
+
+        scale_x = canvas_width / scene_width
+        scale_y = canvas_height / scene_height
+
+        return scale_x, scale_y, scene_width, scene_height
+
+    def scene_to_canvas_point(
+        self,
+        x,
+        y,
+        scene=None
+    ):
+
+        scale_x, scale_y, _, _ = self.get_editor_transform(
+            scene
+        )
+
+        return x * scale_x, y * scale_y
+
+    def canvas_to_scene_point(
+        self,
+        x,
+        y,
+        scene=None
+    ):
+
+        scale_x, scale_y, scene_width, scene_height = self.get_editor_transform(
+            scene
+        )
+
+        scene_x = int(round(x / scale_x))
+        scene_y = int(round(y / scale_y))
+
+        scene_x = min(
+            max(scene_x, 0),
+            scene_width - 1
+        )
+
+        scene_y = min(
+            max(scene_y, 0),
+            scene_height - 1
+        )
+
+        return scene_x, scene_y
 
     # =========================================================
     # EDITOR
@@ -2390,10 +2982,14 @@ class VideoMapper:
         if self.canvas_height <= 1:
             return
 
-        output = self.render_scene(
-            self.canvas_width,
-            self.canvas_height
-        )
+        with self.web_lock:
+
+            output = self.render_scene(
+                self.canvas_width,
+                self.canvas_height,
+                self.current_scene,
+                playback=False
+            )
 
         output = cv2.cvtColor(
             output,
@@ -2428,9 +3024,15 @@ class VideoMapper:
 
                 for x, y in face.points:
 
-                    points.extend([
+                    cx, cy = self.scene_to_canvas_point(
                         x,
-                        y
+                        y,
+                        self.current_scene
+                    )
+
+                    points.extend([
+                        cx,
+                        cy
                     ])
 
                 if face == self.selected_face:
@@ -2453,13 +3055,19 @@ class VideoMapper:
 
                     for x, y in face.points:
 
+                        cx, cy = self.scene_to_canvas_point(
+                            x,
+                            y,
+                            self.current_scene
+                        )
+
                         radius = 9
 
                         self.canvas.create_oval(
-                            x - radius,
-                            y - radius,
-                            x + radius,
-                            y + radius,
+                            cx - radius,
+                            cy - radius,
+                            cx + radius,
+                            cy + radius,
                             fill="red",
                             outline="white",
                             width=2,
@@ -2471,22 +3079,6 @@ class VideoMapper:
     # =========================================================
 
     def editor_video_loop(self):
-
-        if self.editor_running:
-
-            has_video = False
-
-            if self.current_scene:
-
-                for face in self.current_scene.faces:
-
-                    if face.is_video:
-
-                        has_video = True
-
-            if has_video:
-
-                self.redraw()
 
         self.root.after(
             40,
@@ -2506,13 +3098,19 @@ class VideoMapper:
         if self.current_scene is None:
             return None
 
+        scene_x, scene_y = self.canvas_to_scene_point(
+            x,
+            y,
+            self.current_scene
+        )
+
         for face in reversed(
             self.current_scene.faces
         ):
 
             if self.point_in_polygon(
-                x,
-                y,
+                scene_x,
+                scene_y,
                 face.points
             ):
 
@@ -2636,9 +3234,15 @@ class VideoMapper:
                 self.selected_face.points
             ):
 
+                cx, cy = self.scene_to_canvas_point(
+                    x,
+                    y,
+                    self.current_scene
+                )
+
                 distance = (
-                    (event.x - x) ** 2 +
-                    (event.y - y) ** 2
+                    (event.x - cx) ** 2 +
+                    (event.y - cy) ** 2
                 ) ** 0.5
 
                 if distance < 20:
@@ -2687,11 +3291,17 @@ class VideoMapper:
         if self.selected_corner is None:
             return
 
+        scene_x, scene_y = self.canvas_to_scene_point(
+            event.x,
+            event.y,
+            self.current_scene
+        )
+
         self.selected_face.points[
             self.selected_corner
         ] = [
-            event.x,
-            event.y
+            scene_x,
+            scene_y
         ]
 
         self.redraw()
@@ -2774,6 +3384,32 @@ class VideoMapper:
 
         self.redraw()
 
+    def rescale_current_scene(self):
+
+        if self.is_execution_mode():
+
+            self.warn_execution_mode()
+
+            return
+
+        scene = self.current_scene
+
+        if scene is None:
+            return
+
+        changed = self.adapt_scene_to_assigned_screen(
+            scene,
+            force=True
+        )
+
+        if changed:
+
+            self.save_project(
+                notify=False
+            )
+
+        self.redraw()
+
     # =========================================================
     # GUARDAR
     # =========================================================
@@ -2804,6 +3440,8 @@ class VideoMapper:
             scene_data = {
                 "name": scene.name,
                 "screen_index": scene.screen_index,
+                "space_width": scene.space_width,
+                "space_height": scene.space_height,
                 "faces": []
             }
 
@@ -2895,6 +3533,20 @@ class VideoMapper:
             os.path.basename(project_dir)
         )
 
+        default_scene_width = int(
+            data.get(
+                "width",
+                self.canvas_width
+            )
+        )
+
+        default_scene_height = int(
+            data.get(
+                "height",
+                self.canvas_height
+            )
+        )
+
         self.scenes = []
 
         for scene_data in data.get(
@@ -2910,6 +3562,14 @@ class VideoMapper:
                 scene_data.get(
                     "screen_index",
                     0
+                ),
+                scene_data.get(
+                    "space_width",
+                    default_scene_width
+                ),
+                scene_data.get(
+                    "space_height",
+                    default_scene_height
                 )
             )
 
@@ -2923,13 +3583,20 @@ class VideoMapper:
                     ""
                 )
 
+                media_path = self.resolve_media_path(
+                    raw_file
+                )
+
+                media_path = self.normalize_video_for_scene(
+                    media_path,
+                    scene
+                )
+
                 face = Face(
                     points=face_data.get(
                         "points"
                     ),
-                    filename=self.resolve_media_path(
-                        raw_file
-                    ),
+                    filename=media_path,
                     flip_x=face_data.get(
                         "flip_x",
                         False
@@ -2949,6 +3616,12 @@ class VideoMapper:
                 )
 
             self.scenes.append(
+                scene
+            )
+
+        for scene in self.scenes:
+
+            self.adapt_scene_to_assigned_screen(
                 scene
             )
 
@@ -2972,6 +3645,10 @@ class VideoMapper:
         self.update_scene_label()
 
         self.redraw()
+
+        self.save_project(
+            notify=False
+        )
 
     def open_project(self):
 
@@ -3376,6 +4053,16 @@ class VideoMapper:
                 self.selected_face = None
                 self.selected_corner = None
 
+                changed = self.adapt_scene_to_assigned_screen(
+                    scene
+                )
+
+                if changed:
+
+                    self.save_project(
+                        notify=False
+                    )
+
             self.schedule_ui_refresh()
 
             return jsonify(
@@ -3401,11 +4088,70 @@ class VideoMapper:
                         "ok": False
                     }), 404
 
+                previous_width, previous_height = self.get_scene_space(
+                    scene
+                )
+
                 scene.screen_index = int(
                     data.get(
                         "screen_index",
                         0
                     )
+                )
+
+                self.adapt_scene_to_assigned_screen(
+                    scene,
+                    source_width=previous_width,
+                    source_height=previous_height,
+                    force=True
+                )
+
+                self.normalize_scene_videos(
+                    scene
+                )
+
+                self.save_project(
+                    notify=False
+                )
+
+            self.schedule_ui_refresh()
+
+            return jsonify(
+                self.get_web_state()
+            )
+
+        @app.route("/api/scenes/<int:index>/rescale", methods=["POST"])
+        def web_rescale_scene(index):
+
+            data = request.get_json(
+                silent=True
+            ) or {}
+
+            with self.web_lock:
+
+                scene = self.get_scene_by_index(
+                    index
+                )
+
+                if scene is None:
+
+                    return jsonify({
+                        "ok": False
+                    }), 404
+
+                source_width = data.get(
+                    "source_width"
+                )
+
+                source_height = data.get(
+                    "source_height"
+                )
+
+                self.adapt_scene_to_assigned_screen(
+                    scene,
+                    source_width=source_width,
+                    source_height=source_height,
+                    force=True
                 )
 
                 self.save_project(
@@ -3470,7 +4216,8 @@ class VideoMapper:
                 try:
 
                     path = self.save_uploaded_file_to_assets(
-                        uploaded
+                        uploaded,
+                        scene
                     )
 
                 except Exception as e:
@@ -3698,10 +4445,21 @@ class VideoMapper:
 
             with self.web_lock:
 
+                scene = self.get_scene_by_index(
+                    scene_index
+                )
+
+                if scene is None:
+
+                    return jsonify({
+                        "ok": False
+                    }), 404
+
                 try:
 
                     path = self.save_uploaded_file_to_assets(
-                        uploaded
+                        uploaded,
+                        scene
                     )
 
                 except Exception as e:
@@ -3928,6 +4686,10 @@ class VideoMapper:
 
             scenes = []
 
+            canvas_width, canvas_height = self.get_scene_space(
+                self.current_scene
+            )
+
             for scene in self.scenes:
 
                 faces = []
@@ -3957,8 +4719,8 @@ class VideoMapper:
                 "execution_mode": self.execution_mode,
                 "web_control_active": self.web_control_active,
                 "single_screen": len(self.available_screens) <= 1,
-                "canvas_width": self.canvas_width,
-                "canvas_height": self.canvas_height,
+                "canvas_width": canvas_width,
+                "canvas_height": canvas_height,
                 "web_local_url": f"http://127.0.0.1:{self.web_port}",
                 "web_lan_url": f"http://{self.web_host_ip}:{self.web_port}",
                 "project": self.get_current_project_info(),
@@ -3975,24 +4737,29 @@ class VideoMapper:
 
         while True:
 
+            if self.execution_mode:
+
+                time.sleep(
+                    0.1
+                )
+
+                continue
+
             try:
-
-                width = max(
-                    self.canvas_width,
-                    640
-                )
-
-                height = max(
-                    self.canvas_height,
-                    360
-                )
-
                 with self.web_lock:
+
+                    width, height = self.get_scene_space(
+                        self.current_scene
+                    )
+
+                    width = max(width, 2)
+                    height = max(height, 2)
 
                     frame = self.render_scene(
                         width,
                         height,
-                        self.current_scene
+                        self.current_scene,
+                        playback=False
                     )
 
                 ok, buffer = cv2.imencode(
@@ -4163,6 +4930,8 @@ class VideoMapper:
         player_canvas = tk.Canvas(
             player_window,
             bg="black",
+            width=screen["width"],
+            height=screen["height"],
             highlightthickness=0
         )
 
@@ -4186,14 +4955,28 @@ class VideoMapper:
         ] = {
             "window": player_window,
             "canvas": player_canvas,
+            "screen_width": screen["width"],
+            "screen_height": screen["height"],
+            "image_item": None,
             "running": True
         }
 
         self.player_running = True
 
+        print(
+            f"[player] Ventana creada para '{scene.name}' "
+            f"-> {screen['name']} ({screen['width']}x{screen['height']})"
+        )
+
         player_window.after(
             50,
             lambda: self.player_loop(scene)
+        )
+
+        # Reafirma tamaño exacto de salida en pantalla asignada.
+        player_window.update_idletasks()
+        player_window.geometry(
+            self.build_screen_geometry(screen)
         )
 
         player_window.lift()
@@ -4233,29 +5016,28 @@ class VideoMapper:
 
         try:
 
-            width = (
-                player_canvas.winfo_width()
+            width = int(
+                player.get(
+                    "screen_width",
+                    0
+                )
             )
 
-            height = (
-                player_canvas.winfo_height()
+            height = int(
+                player.get(
+                    "screen_height",
+                    0
+                )
             )
 
-            if width <= 1:
+            if width <= 1 or height <= 1:
 
                 screen = self.get_screen(
                     scene.screen_index
                 )
 
-                width = screen["width"]
-
-            if height <= 1:
-
-                screen = self.get_screen(
-                    scene.screen_index
-                )
-
-                height = screen["height"]
+                width = int(screen["width"])
+                height = int(screen["height"])
 
             if (
                 not self.execution_mode
@@ -4273,11 +5055,16 @@ class VideoMapper:
 
             else:
 
-                output = self.render_scene(
-                    width,
-                    height,
-                    scene
-                )
+                # Serializado con web_lock: evita que el hilo del stream
+                # web lea el mismo cv2.VideoCapture al mismo tiempo.
+                with self.web_lock:
+
+                    output = self.render_scene(
+                        width,
+                        height,
+                        scene,
+                        playback=self.execution_mode
+                    )
 
             output = cv2.cvtColor(
                 output,
@@ -4292,17 +5079,28 @@ class VideoMapper:
                 image
             )
 
-            player_canvas.delete(
-                "player_image"
+            image_item = player.get(
+                "image_item"
             )
 
-            player_canvas.create_image(
-                0,
-                0,
-                image=photo,
-                anchor="nw",
-                tags="player_image"
-            )
+            if image_item is None:
+
+                image_item = player_canvas.create_image(
+                    0,
+                    0,
+                    image=photo,
+                    anchor="nw",
+                    tags="player_image"
+                )
+
+                player["image_item"] = image_item
+
+            else:
+
+                player_canvas.itemconfig(
+                    image_item,
+                    image=photo
+                )
 
             player_canvas.photo = photo
 
@@ -4311,19 +5109,47 @@ class VideoMapper:
                 lambda: self.player_loop(scene)
             )
 
-        except tk.TclError:
+        except tk.TclError as e:
+
+            window_alive = False
+
+            try:
+                window_alive = player_window.winfo_exists()
+            except Exception:
+                window_alive = False
+
+            print(
+                f"[player] TclError en '{scene.name}' "
+                f"(ventana viva: {window_alive}): {e}"
+            )
+
+            if window_alive:
+
+                player_window.after(
+                    100,
+                    lambda: self.player_loop(scene)
+                )
+
+                return
 
             self.player_windows.pop(
                 scene,
                 None
             )
 
+            if self.execution_mode or scene == self.current_scene:
+
+                self.play_scene(
+                    scene
+                )
+
         except Exception as e:
 
             print(
-                "Error player:",
-                e
+                f"[player] Error inesperado en '{scene.name}': {e}"
             )
+
+            traceback.print_exc()
 
             player_window.after(
                 100,
@@ -4422,6 +5248,8 @@ class VideoMapper:
 # =============================================================
 
 if __name__ == "__main__":
+
+    configure_windows_dpi_awareness()
 
     root = tk.Tk()
 

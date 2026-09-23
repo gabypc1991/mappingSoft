@@ -525,6 +525,15 @@ async function assignScreen() {
   await loadState();
 }
 
+async function rescaleScene() {
+  await api("/api/scenes/" + state.current_scene_index + "/rescale", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({})
+  });
+  await loadState();
+}
+
 async function addFace() {
   pickFaceForNew();
 }
@@ -664,5 +673,9 @@ async function openSelectedProject() {
 }
 
 window.addEventListener("resize", draw);
-setInterval(loadState, 1500);
+setInterval(() => {
+  if (!state || !state.execution_mode) {
+    loadState();
+  }
+}, 1500);
 loadState();
