@@ -86,12 +86,20 @@ class Face:
         self.video = None
         self.video_frame = None
         self.first_video_frame = None
+        self.video_fps = 30.0
+        self.video_frame_count = 0
+        self.playback_started_at = None
+        self.playback_frame_index = -1
+        self.playback_frame = None
+        self.playback_stop_event = None
+        self.playback_thread = None
 
         self.photo = None
 
         self.cached_warp_key = None
         self.cached_warped = None
         self.cached_mask = None
+        self.cached_roi = None
 
         self.is_video = False
 
@@ -112,6 +120,7 @@ class Face:
         self.cached_warp_key = None
         self.cached_warped = None
         self.cached_mask = None
+        self.cached_roi = None
 
         if not self.filename:
             return
@@ -161,6 +170,17 @@ class Face:
 
                 else:
 
+                    self.video_fps = self.video.get(
+                        cv2.CAP_PROP_FPS
+                    )
+
+                    if self.video_fps <= 0:
+                        self.video_fps = 30.0
+
+                    self.video_frame_count = int(
+                        self.video.get(cv2.CAP_PROP_FRAME_COUNT)
+                    )
+
                     self.read_video_frame()
 
                     if self.video_frame is not None:
@@ -198,6 +218,243 @@ class Face:
         if ret:
 
             self.video_frame = frame
+
+            return frame
+
+        return None
+
+    def reset_playback(self):
+
+        if not self.is_video or self.video is None:
+            return
+
+        self.video.set(
+            cv2.CAP_PROP_POS_FRAMES,
+            0
+        )
+
+        self.playback_started_at = time.perf_counter()
+        self.playback_frame_index = -1
+
+    def start_playback_worker(self):
+
+        if not self.is_video or not self.filename:
+            return
+
+        self.stop_playback_worker()
+
+        stop_event = threading.Event()
+        self.playback_stop_event = stop_event
+        self.playback_frame = self.first_video_frame
+
+        self.playback_thread = threading.Thread(
+            target=self.playback_worker,
+            args=(stop_event,),
+            daemon=True
+        )
+
+        self.playback_thread.start()
+
+    def stop_playback_worker(self):
+
+        if self.playback_stop_event is not None:
+            self.playback_stop_event.set()
+
+        self.playback_stop_event = None
+        self.playback_thread = None
+        self.playback_frame = None
+
+    def playback_worker(
+        self,
+        stop_event
+    ):
+
+        capture = cv2.VideoCapture(
+            self.filename
+        )
+
+        if not capture.isOpened():
+            capture.release()
+            return
+
+        fps = capture.get(
+            cv2.CAP_PROP_FPS
+        )
+
+        if fps <= 0:
+            fps = self.video_fps or 30.0
+
+        frame_count = int(
+            capture.get(cv2.CAP_PROP_FRAME_COUNT)
+        )
+
+        started_at = time.perf_counter()
+        frame_index = -1
+        output_interval = 1.0 / min(
+            fps,
+            20.0
+        )
+        next_output_at = started_at
+
+        try:
+
+            while not stop_event.is_set():
+
+                now = time.perf_counter()
+
+                if now < next_output_at:
+
+                    if stop_event.wait(next_output_at - now):
+                        return
+
+                    now = time.perf_counter()
+
+                next_output_at = now + output_interval
+                elapsed = now - started_at
+                target_index = int(elapsed * fps)
+
+                if frame_count > 0:
+                    target_index %= frame_count
+
+                if target_index < frame_index:
+
+                    capture.set(
+                        cv2.CAP_PROP_POS_FRAMES,
+                        0
+                    )
+
+                    frame_index = -1
+
+                if target_index == frame_index:
+                    continue
+
+                frames_behind = target_index - frame_index - 1
+                max_sequential_skips = max(
+                    12,
+                    int(fps * 0.5)
+                )
+
+                if frames_behind > max_sequential_skips:
+
+                    capture.set(
+                        cv2.CAP_PROP_POS_FRAMES,
+                        target_index
+                    )
+
+                    frame_index = target_index - 1
+
+                while frame_index + 1 < target_index:
+
+                    if stop_event.is_set():
+                        return
+
+                    if not capture.grab():
+
+                        capture.set(
+                            cv2.CAP_PROP_POS_FRAMES,
+                            0
+                        )
+
+                        frame_index = -1
+                        break
+
+                    frame_index += 1
+
+                ok, frame = capture.read()
+
+                if not ok:
+
+                    capture.set(
+                        cv2.CAP_PROP_POS_FRAMES,
+                        0
+                    )
+
+                    started_at = time.perf_counter()
+                    frame_index = -1
+                    continue
+
+                frame_index = target_index
+
+                if not stop_event.is_set():
+                    self.playback_frame = frame
+
+        finally:
+
+            capture.release()
+
+    def read_video_frame_synced(self):
+
+        if self.video is None:
+            return None
+
+        if self.playback_started_at is None:
+            self.reset_playback()
+
+        elapsed = time.perf_counter() - self.playback_started_at
+        target_index = int(elapsed * self.video_fps)
+
+        if self.video_frame_count > 0:
+            target_index %= self.video_frame_count
+
+        if target_index == self.playback_frame_index:
+            return self.video_frame
+
+        if target_index < self.playback_frame_index:
+
+            self.video.set(
+                cv2.CAP_PROP_POS_FRAMES,
+                0
+            )
+
+            self.playback_frame_index = -1
+
+        frames_behind = (
+            target_index - self.playback_frame_index - 1
+        )
+
+        max_sequential_skips = max(
+            12,
+            int(self.video_fps * 0.5)
+        )
+
+        if frames_behind > max_sequential_skips:
+
+            self.video.set(
+                cv2.CAP_PROP_POS_FRAMES,
+                target_index
+            )
+
+            self.playback_frame_index = target_index - 1
+
+        while self.playback_frame_index + 1 < target_index:
+
+            if not self.video.grab():
+
+                self.video.set(
+                    cv2.CAP_PROP_POS_FRAMES,
+                    0
+                )
+
+                self.playback_frame_index = -1
+
+                break
+
+            self.playback_frame_index += 1
+
+        ret, frame = self.video.read()
+
+        if not ret:
+
+            self.reset_playback()
+
+            ret, frame = self.video.read()
+
+            target_index = 0
+
+        if ret:
+
+            self.video_frame = frame
+            self.playback_frame_index = target_index
 
             return frame
 
@@ -243,13 +500,19 @@ class Face:
         if self.is_video:
 
             if playback:
-                return self.read_video_frame()
+
+                if self.playback_frame is not None:
+                    return self.playback_frame
+
+                return self.first_video_frame
 
             return self.get_first_video_frame()
 
         return self.image
 
     def close_video(self):
+
+        self.stop_playback_worker()
 
         if self.video is not None:
 
@@ -258,10 +521,13 @@ class Face:
         self.video = None
         self.video_frame = None
         self.first_video_frame = None
+        self.playback_started_at = None
+        self.playback_frame_index = -1
 
         self.cached_warp_key = None
         self.cached_warped = None
         self.cached_mask = None
+        self.cached_roi = None
 
 
 class Scene:
@@ -2634,7 +2900,9 @@ class VideoMapper:
     def get_face_frame(
         self,
         face,
-        playback=False
+        playback=False,
+        target_width=None,
+        target_height=None
     ):
 
         if face.is_video:
@@ -2649,6 +2917,36 @@ class VideoMapper:
 
         if frame is None:
             return None
+
+        if target_width and target_height:
+
+            source_height, source_width = frame.shape[:2]
+
+            if face.rotation_degrees in (90, 270):
+                useful_width = target_height
+                useful_height = target_width
+            else:
+                useful_width = target_width
+                useful_height = target_height
+
+            scale = min(
+                max(
+                    useful_width / source_width,
+                    useful_height / source_height
+                ) * 1.1,
+                1.0
+            )
+
+            if scale < 1.0:
+
+                frame = cv2.resize(
+                    frame,
+                    (
+                        max(int(source_width * scale), 2),
+                        max(int(source_height * scale), 2)
+                    ),
+                    interpolation=cv2.INTER_AREA
+                )
 
         if face.flip_x and face.flip_y:
             frame = cv2.flip(
@@ -2690,7 +2988,7 @@ class VideoMapper:
                 (rotated_width, rotated_height)
             )
 
-        return frame.copy()
+        return frame
 
     # =========================================================
     # CREAR IMAGEN DE LA ESCENA
@@ -2729,26 +3027,6 @@ class VideoMapper:
 
         for face in scene.faces:
 
-            frame = self.get_face_frame(
-                face,
-                playback=playback
-            )
-
-            if frame is None:
-                continue
-
-            h, w = frame.shape[:2]
-
-            if w <= 0 or h <= 0:
-                continue
-
-            source_points = np.float32([
-                [0, 0],
-                [w - 1, 0],
-                [w - 1, h - 1],
-                [0, h - 1]
-            ])
-
             destination_points = np.float32([
                 [
                     face.points[0][0] * sx,
@@ -2767,6 +3045,22 @@ class VideoMapper:
                     face.points[3][1] * sy
                 ]
             ])
+
+            polygon = np.int32(
+                np.round(destination_points)
+            )
+
+            x, y, roi_width, roi_height = cv2.boundingRect(
+                polygon
+            )
+
+            x0 = max(x, 0)
+            y0 = max(y, 0)
+            x1 = min(x + roi_width, width)
+            y1 = min(y + roi_height, height)
+
+            if x1 <= x0 or y1 <= y0:
+                continue
 
             # Cachea caras estáticas para evitar recalcular perspectiva cada frame.
             can_cache = (
@@ -2800,42 +3094,71 @@ class VideoMapper:
                 and face.cached_warp_key == cache_key
                 and face.cached_warped is not None
                 and face.cached_mask is not None
+                and face.cached_roi is not None
             ):
 
                 warped = face.cached_warped
                 mask = face.cached_mask
+                x0, y0, x1, y1 = face.cached_roi
 
             else:
 
+                frame = self.get_face_frame(
+                    face,
+                    playback=playback,
+                    target_width=x1 - x0,
+                    target_height=y1 - y0
+                )
+
+                if frame is None:
+                    continue
+
+                frame_height, frame_width = frame.shape[:2]
+
+                if frame_width <= 0 or frame_height <= 0:
+                    continue
+
+                source_points = np.float32([
+                    [0, 0],
+                    [frame_width - 1, 0],
+                    [frame_width - 1, frame_height - 1],
+                    [0, frame_height - 1]
+                ])
+
+                local_destination_points = destination_points - np.float32([
+                    x0,
+                    y0
+                ])
+
                 matrix = cv2.getPerspectiveTransform(
                     source_points,
-                    destination_points
+                    local_destination_points
                 )
 
                 warped = cv2.warpPerspective(
                     frame,
                     matrix,
                     (
-                        width,
-                        height
+                        x1 - x0,
+                        y1 - y0
                     )
                 )
 
                 mask = np.zeros(
                     (
-                        height,
-                        width
+                        y1 - y0,
+                        x1 - x0
                     ),
                     dtype=np.uint8
                 )
 
-                polygon = np.int32(
-                    destination_points
+                local_polygon = np.int32(
+                    np.round(local_destination_points)
                 )
 
                 cv2.fillConvexPoly(
                     mask,
-                    polygon,
+                    local_polygon,
                     255
                 )
 
@@ -2846,8 +3169,19 @@ class VideoMapper:
                     face.cached_warp_key = cache_key
                     face.cached_warped = warped
                     face.cached_mask = mask
+                    face.cached_roi = (
+                        x0,
+                        y0,
+                        x1,
+                        y1
+                    )
 
-            output[
+            output_roi = output[
+                y0:y1,
+                x0:x1
+            ]
+
+            output_roi[
                 mask
             ] = warped[
                 mask
@@ -4797,6 +5131,8 @@ class VideoMapper:
 
         self.execution_mode = False
 
+        self.stop_execution_workers()
+
         self.root.withdraw()
 
         self.close_all_players()
@@ -4812,6 +5148,8 @@ class VideoMapper:
         self.web_control_active = False
 
         self.execution_mode = False
+
+        self.stop_execution_workers()
 
         self.close_all_players()
 
@@ -4838,6 +5176,12 @@ class VideoMapper:
         self.dragging = False
         self.selected_corner = None
 
+        for scene in self.scenes:
+
+            for face in scene.faces:
+
+                face.start_playback_worker()
+
         self.close_all_players()
 
         for scene in self.scenes:
@@ -4850,10 +5194,29 @@ class VideoMapper:
 
         self.execution_mode = False
 
+        self.stop_execution_workers()
+
         self.dragging = False
         self.selected_corner = None
 
         self.show_edit_outputs()
+
+    def stop_execution_workers(self):
+
+        for scene in self.scenes:
+
+            for face in scene.faces:
+
+                face.stop_playback_worker()
+
+        for player in self.player_windows.values():
+
+            stop_event = player.get(
+                "render_stop_event"
+            )
+
+            if stop_event is not None:
+                stop_event.set()
 
     def show_edit_outputs(self):
 
@@ -4958,8 +5321,24 @@ class VideoMapper:
             "screen_width": screen["width"],
             "screen_height": screen["height"],
             "image_item": None,
+            "latest_output": None,
+            "latest_output_id": 0,
+            "displayed_output_id": -1,
+            "render_stop_event": threading.Event(),
             "running": True
         }
+
+        player = self.player_windows[
+            scene
+        ]
+
+        if self.execution_mode:
+
+            threading.Thread(
+                target=self.player_render_worker,
+                args=(scene, player),
+                daemon=True
+            ).start()
 
         self.player_running = True
 
@@ -4980,6 +5359,98 @@ class VideoMapper:
         )
 
         player_window.lift()
+
+    def player_render_worker(
+        self,
+        scene,
+        player
+    ):
+
+        stop_event = player[
+            "render_stop_event"
+        ]
+
+        width = int(
+            player["screen_width"]
+        )
+
+        height = int(
+            player["screen_height"]
+        )
+
+        video_count = sum(
+            1
+            for face in scene.faces
+            if face.is_video
+        )
+
+        if video_count >= 3:
+            render_scale = 0.5
+        elif video_count == 2:
+            render_scale = 0.75
+        else:
+            render_scale = 1.0
+
+        render_width = max(
+            int(width * render_scale),
+            1
+        )
+
+        render_height = max(
+            int(height * render_scale),
+            1
+        )
+
+        while (
+            not stop_event.is_set()
+            and self.execution_mode
+            and player.get("running", False)
+        ):
+
+            started_at = time.perf_counter()
+
+            try:
+
+                output = self.render_scene(
+                    render_width,
+                    render_height,
+                    scene,
+                    playback=True
+                )
+
+                if render_width != width or render_height != height:
+
+                    output = cv2.resize(
+                        output,
+                        (
+                            width,
+                            height
+                        ),
+                        interpolation=cv2.INTER_LINEAR
+                    )
+
+                if stop_event.is_set() or not self.execution_mode:
+                    return
+
+                player["latest_output"] = output
+                player["latest_output_id"] += 1
+
+            except Exception as e:
+
+                print(
+                    f"[player] Error renderizando '{scene.name}': {e}"
+                )
+
+                traceback.print_exc()
+
+                if stop_event.wait(0.1):
+                    return
+
+            elapsed = time.perf_counter() - started_at
+            remaining = (1.0 / 30.0) - elapsed
+
+            if remaining > 0 and stop_event.wait(remaining):
+                return
 
     # =========================================================
     # LOOP DEL PLAYER
@@ -5015,6 +5486,8 @@ class VideoMapper:
         ]
 
         try:
+
+            frame_started_at = time.perf_counter()
 
             width = int(
                 player.get(
@@ -5052,6 +5525,31 @@ class VideoMapper:
                     ),
                     dtype=np.uint8
                 )
+
+            elif self.execution_mode:
+
+                output = player.get(
+                    "latest_output"
+                )
+
+                output_id = player.get(
+                    "latest_output_id",
+                    0
+                )
+
+                if (
+                    output is None
+                    or output_id == player.get("displayed_output_id")
+                ):
+
+                    player_window.after(
+                        5,
+                        lambda: self.player_loop(scene)
+                    )
+
+                    return
+
+                player["displayed_output_id"] = output_id
 
             else:
 
@@ -5104,8 +5602,17 @@ class VideoMapper:
 
             player_canvas.photo = photo
 
+            elapsed_ms = int(
+                (time.perf_counter() - frame_started_at) * 1000
+            )
+
+            next_delay = max(
+                1,
+                33 - elapsed_ms
+            )
+
             player_window.after(
-                33,
+                next_delay,
                 lambda: self.player_loop(scene)
             )
 
@@ -5176,6 +5683,13 @@ class VideoMapper:
         player[
             "running"
         ] = False
+
+        stop_event = player.get(
+            "render_stop_event"
+        )
+
+        if stop_event is not None:
+            stop_event.set()
 
         window = player.get(
             "window"
