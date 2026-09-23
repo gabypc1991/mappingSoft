@@ -40,7 +40,8 @@ class Face:
         points=None,
         filename="",
         flip_x=False,
-        flip_y=False
+        flip_y=False,
+        rotation_degrees=0
     ):
 
         self.points = points or [
@@ -54,6 +55,7 @@ class Face:
 
         self.flip_x = flip_x
         self.flip_y = flip_y
+        self.rotation_degrees = rotation_degrees % 360
 
         self.image = None
 
@@ -2112,6 +2114,34 @@ class VideoMapper:
             "y"
         )
 
+    def rotate_selected_face(
+        self,
+        degrees
+    ):
+
+        if self.is_execution_mode():
+
+            self.warn_execution_mode()
+
+            return
+
+        face = self.selected_face
+
+        if face is None:
+
+            messagebox.showinfo(
+                "Cara",
+                "Primero selecciona una cara."
+            )
+
+            return
+
+        face.rotation_degrees = (
+            face.rotation_degrees + degrees
+        ) % 360
+
+        self.redraw()
+
     def toggle_selected_face_flip(
         self,
         axis
@@ -2162,24 +2192,43 @@ class VideoMapper:
             return None
 
         if face.flip_x and face.flip_y:
-
-            return cv2.flip(
+            frame = cv2.flip(
                 frame,
                 -1
             )
 
-        if face.flip_x:
+        elif face.flip_x:
 
-            return cv2.flip(
+            frame = cv2.flip(
                 frame,
                 1
             )
 
-        if face.flip_y:
+        elif face.flip_y:
 
-            return cv2.flip(
+            frame = cv2.flip(
                 frame,
                 0
+            )
+
+        if face.rotation_degrees:
+
+            height, width = frame.shape[:2]
+            matrix = cv2.getRotationMatrix2D(
+                (width / 2, height / 2),
+                face.rotation_degrees,
+                1
+            )
+            cosine = abs(matrix[0, 0])
+            sine = abs(matrix[0, 1])
+            rotated_width = int(height * sine + width * cosine)
+            rotated_height = int(height * cosine + width * sine)
+            matrix[0, 2] += rotated_width / 2 - width / 2
+            matrix[1, 2] += rotated_height / 2 - height / 2
+            frame = cv2.warpAffine(
+                frame,
+                matrix,
+                (rotated_width, rotated_height)
             )
 
         return frame.copy()
@@ -2529,6 +2578,28 @@ class VideoMapper:
         menu.add_separator()
 
         menu.add_command(
+            label="Rotar 5° a la izquierda",
+            command=lambda: self.rotate_selected_face(5)
+        )
+
+        menu.add_command(
+            label="Rotar 5° a la derecha",
+            command=lambda: self.rotate_selected_face(-5)
+        )
+
+        menu.add_command(
+            label="Rotar 90° a la izquierda",
+            command=lambda: self.rotate_selected_face(90)
+        )
+
+        menu.add_command(
+            label="Rotar 90° a la derecha",
+            command=lambda: self.rotate_selected_face(-90)
+        )
+
+        menu.add_separator()
+
+        menu.add_command(
             label="Eliminar cara",
             command=self.delete_selected_face
         )
@@ -2750,7 +2821,9 @@ class VideoMapper:
 
                     "flip_x": face.flip_x,
 
-                    "flip_y": face.flip_y
+                    "flip_y": face.flip_y,
+
+                    "rotation_degrees": face.rotation_degrees
                 })
 
             data[
@@ -2864,6 +2937,10 @@ class VideoMapper:
                     flip_y=face_data.get(
                         "flip_y",
                         False
+                    ),
+                    rotation_degrees=face_data.get(
+                        "rotation_degrees",
+                        0
                     )
                 )
 
@@ -3557,6 +3634,53 @@ class VideoMapper:
             )
 
         @app.route(
+            "/api/scenes/<int:scene_index>/faces/<int:face_index>/rotate",
+            methods=["POST"]
+        )
+        def web_rotate_face(scene_index, face_index):
+
+            data = request.get_json(
+                silent=True
+            ) or {}
+
+            degrees = data.get(
+                "degrees"
+            )
+
+            if not isinstance(degrees, (int, float)):
+
+                return jsonify({
+                    "ok": False
+                }), 400
+
+            with self.web_lock:
+
+                face = self.get_face_by_index(
+                    scene_index,
+                    face_index
+                )
+
+                if face is None:
+
+                    return jsonify({
+                        "ok": False
+                    }), 404
+
+                face.rotation_degrees = (
+                    face.rotation_degrees + degrees
+                ) % 360
+
+                self.save_project(
+                    notify=False
+                )
+
+            self.schedule_ui_refresh()
+
+            return jsonify(
+                self.get_web_state()
+            )
+
+        @app.route(
             "/api/scenes/<int:scene_index>/faces/<int:face_index>/file",
             methods=["POST"]
         )
@@ -3816,7 +3940,8 @@ class VideoMapper:
                             face.filename
                         ),
                         "flip_x": face.flip_x,
-                        "flip_y": face.flip_y
+                        "flip_y": face.flip_y,
+                        "rotation_degrees": face.rotation_degrees
                     })
 
                 scenes.append({

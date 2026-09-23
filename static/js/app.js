@@ -554,6 +554,20 @@ async function flipFace(axis) {
   await loadState();
 }
 
+async function rotateFace(degrees) {
+  if (menuFace < 0) {
+    return;
+  }
+
+  await api("/api/scenes/" + state.current_scene_index + "/faces/" + menuFace + "/rotate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ degrees })
+  });
+  menu.style.display = "none";
+  await loadState();
+}
+
 function pickFile() {
   document.getElementById("fileInput").click();
 }
