@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Video Mapper Web</title>
+  <link
+    href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+    rel="stylesheet"
+    integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH"
+    crossorigin="anonymous"
+  >
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
+</head>
+<body>
+  <header class="top-shell py-2 px-2 px-md-3">
+    <div class="d-flex flex-wrap gap-2 align-items-center">
+      <button class="btn btn-success btn-sm toolbar-btn" onclick="newScene()">+ Escena</button>
+      <select id="sceneSelect" class="form-select form-select-sm w-auto" onchange="selectScene()"></select>
+      <button class="btn btn-outline-danger btn-sm toolbar-btn" onclick="deleteScene()">Eliminar</button>
+
+      <select id="screenSelect" class="form-select form-select-sm w-auto" onchange="assignScreen()"></select>
+      <button class="btn btn-info btn-sm toolbar-btn" onclick="pickFaceForNew()">+ Cara</button>
+      <input id="newFaceInput" type="file" accept="image/*,video/*" hidden onchange="addFaceFromUpload()">
+
+      <button class="btn btn-warning btn-sm toolbar-btn" onclick="executeAll()">Ejecutar</button>
+      <button class="btn btn-secondary btn-sm toolbar-btn" onclick="exitExecution()">Salir ejecucion</button>
+
+      <button class="btn btn-primary btn-sm toolbar-btn" onclick="takeControl()">Tomar control</button>
+      <button class="btn btn-outline-light btn-sm toolbar-btn" onclick="releaseControl()">Soltar control</button>
+      <button class="btn btn-outline-light btn-sm toolbar-btn" onclick="openProjectsModal()">Proyectos</button>
+      <span id="lanUrlTag" class="badge text-bg-secondary">URL LAN</span>
+      <button class="btn btn-outline-info btn-sm toolbar-btn" onclick="copyLanUrl()">Copiar URL</button>
+
+      <span id="projectTag" class="badge text-bg-info">Proyecto</span>
+      <span id="status" class="badge text-bg-dark ms-auto">Estado</span>
+    </div>
+  </header>
+
+  <main class="stage-wrap">
+    <section class="stage">
+      <img id="stream" src="/stream/editor" alt="Preview">
+      <canvas id="overlay"></canvas>
+    </section>
+  </main>
+
+  <div id="menu" class="list-group">
+    <button class="list-group-item list-group-item-action" onclick="pickFile()">Cambiar imagen o video</button>
+    <button class="list-group-item list-group-item-action" onclick="flipFace('x')">Invertir en X</button>
+    <button class="list-group-item list-group-item-action" onclick="flipFace('y')">Invertir en Y</button>
+    <button class="list-group-item list-group-item-action text-danger" onclick="deleteFace()">Eliminar cara</button>
+  </div>
+
+  <input id="fileInput" type="file" accept="image/*,video/*" hidden onchange="uploadFile()">
+
+  <div class="modal fade" id="projectsModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-content bg-dark text-light border-secondary">
+        <div class="modal-header border-secondary">
+          <h5 class="modal-title">Proyectos</h5>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+        </div>
+        <div class="modal-body">
+          <div class="mb-3">
+            <label class="form-label">Proyecto activo</label>
+            <div id="currentProjectPath" class="form-control form-control-sm bg-secondary-subtle text-dark"></div>
+          </div>
+          <div class="mb-3">
+            <label for="projectSelect" class="form-label">Abrir proyecto existente</label>
+            <select id="projectSelect" class="form-select form-select-sm" onchange="syncSelectedProjectPath()"></select>
+            <div id="selectedProjectPath" class="form-text text-light"></div>
+          </div>
+          <div class="mb-3">
+            <label for="projectNameInput" class="form-label">Crear proyecto</label>
+            <input id="projectNameInput" class="form-control form-control-sm" placeholder="Nombre del proyecto">
+          </div>
+        </div>
+        <div class="modal-footer border-secondary">
+          <button class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Cerrar</button>
+          <button class="btn btn-outline-info btn-sm" onclick="openSelectedProject()">Abrir</button>
+          <button class="btn btn-success btn-sm" onclick="createProject()">Crear nuevo</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz" crossorigin="anonymous"></script>
+  <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>

@@ -3,6 +3,8 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 import json
 import os
 import re
+import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -210,7 +212,11 @@ class VideoMapper:
             bg="black"
         )
 
+        self.maximize_main_window()
+
         self.project_file = None
+        self.current_project_dir = None
+        self.current_assets_dir = None
 
         self.project_name = "Proyecto"
 
@@ -246,22 +252,26 @@ class VideoMapper:
         self.web_thread = None
 
         self.web_port = 5000
+        self.web_host_ip = "127.0.0.1"
 
         self.web_control_active = False
 
-        self.web_media_dir = os.path.join(
-            os.getcwd(),
-            "web_media"
-        )
+        self.projects_root_dir = self.get_projects_root_dir()
 
         os.makedirs(
-            self.web_media_dir,
+            self.projects_root_dir,
             exist_ok=True
         )
 
         self.build_ui()
 
-        self.new_project()
+        self.show_desktop_project_manager(
+            startup=True
+        )
+
+        self.start_web_server(
+            notify=False
+        )
 
         # Actualización de videos del editor
         self.root.after(
@@ -902,6 +912,582 @@ class VideoMapper:
             "Salí del modo ejecución para editar."
         )
 
+    def get_user_documents_dir(self):
+
+        home_dir = os.path.expanduser(
+            "~"
+        )
+
+        candidates = [
+            os.path.join(home_dir, "Documentos"),
+            os.path.join(home_dir, "Documents")
+        ]
+
+        for candidate in candidates:
+
+            if os.path.isdir(candidate):
+
+                return candidate
+
+        return candidates[0]
+
+    def maximize_main_window(self):
+
+        try:
+
+            if sys.platform.startswith("win"):
+
+                self.root.state("zoomed")
+
+                return
+
+            if sys.platform.startswith("linux"):
+
+                try:
+
+                    self.root.attributes(
+                        "-zoomed",
+                        True
+                    )
+
+                    return
+
+                except tk.TclError:
+
+                    pass
+
+            width = self.root.winfo_screenwidth()
+            height = self.root.winfo_screenheight()
+
+            self.root.geometry(
+                f"{width}x{height}+0+0"
+            )
+
+        except Exception:
+
+            pass
+
+    def center_window(
+        self,
+        window,
+        width,
+        height
+    ):
+
+        window.update_idletasks()
+
+        screen_width = window.winfo_screenwidth()
+        screen_height = window.winfo_screenheight()
+
+        x = max(
+            (screen_width - width) // 2,
+            0
+        )
+
+        y = max(
+            (screen_height - height) // 2,
+            0
+        )
+
+        window.geometry(
+            f"{width}x{height}+{x}+{y}"
+        )
+
+    def get_projects_root_dir(self):
+
+        return os.path.join(
+            self.get_user_documents_dir(),
+            "mappingSoft",
+            "proyectos"
+        )
+
+    def normalize_project_name(
+        self,
+        name
+    ):
+
+        value = re.sub(
+            r"\s+",
+            "_",
+            (name or "Proyecto").strip()
+        )
+
+        value = re.sub(
+            r"[^A-Za-z0-9_-]",
+            "",
+            value
+        )
+
+        return value or "Proyecto"
+
+    def get_project_file_path(
+        self,
+        project_dir
+    ):
+
+        return os.path.join(
+            project_dir,
+            "project.json"
+        )
+
+    def get_project_assets_dir(
+        self,
+        project_dir
+    ):
+
+        return os.path.join(
+            project_dir,
+            "assets"
+        )
+
+    def ensure_project_structure(
+        self,
+        project_dir
+    ):
+
+        os.makedirs(
+            project_dir,
+            exist_ok=True
+        )
+
+        os.makedirs(
+            self.get_project_assets_dir(project_dir),
+            exist_ok=True
+        )
+
+    def get_project_list(self):
+
+        if not os.path.isdir(self.projects_root_dir):
+            return []
+
+        projects = []
+
+        for entry in sorted(
+            os.listdir(self.projects_root_dir)
+        ):
+
+            path = os.path.join(
+                self.projects_root_dir,
+                entry
+            )
+
+            if os.path.isdir(path):
+
+                projects.append({
+                    "name": entry,
+                    "path": path
+                })
+
+        return projects
+
+    def create_project_folder(
+        self,
+        name
+    ):
+
+        base_name = self.normalize_project_name(
+            name
+        )
+
+        candidate = base_name
+        suffix = 1
+
+        while os.path.exists(
+            os.path.join(
+                self.projects_root_dir,
+                candidate
+            )
+        ):
+
+            candidate = f"{base_name}_{suffix:02d}"
+            suffix += 1
+
+        project_dir = os.path.join(
+            self.projects_root_dir,
+            candidate
+        )
+
+        self.ensure_project_structure(
+            project_dir
+        )
+
+        return project_dir
+
+    def set_current_project_dir(
+        self,
+        project_dir
+    ):
+
+        self.current_project_dir = project_dir
+
+        self.current_assets_dir = self.get_project_assets_dir(
+            project_dir
+        )
+
+        self.project_file = self.get_project_file_path(
+            project_dir
+        )
+
+        self.project_name = os.path.basename(
+            project_dir
+        )
+
+        self.ensure_project_structure(
+            project_dir
+        )
+
+    def resolve_media_path(
+        self,
+        media_path
+    ):
+
+        if not media_path:
+            return ""
+
+        if os.path.isabs(media_path):
+            return media_path
+
+        if self.current_project_dir:
+
+            absolute = os.path.join(
+                self.current_project_dir,
+                media_path
+            )
+
+            if os.path.exists(absolute):
+                return absolute
+
+            asset_fallback = os.path.join(
+                self.current_assets_dir,
+                os.path.basename(media_path)
+            )
+
+            if os.path.exists(asset_fallback):
+                return asset_fallback
+
+        return media_path
+
+    def media_to_stored_path(
+        self,
+        media_path
+    ):
+
+        if not media_path:
+            return ""
+
+        if (
+            self.current_project_dir
+            and os.path.isabs(media_path)
+        ):
+
+            try:
+
+                relative = os.path.relpath(
+                    media_path,
+                    self.current_project_dir
+                )
+
+                if not relative.startswith(".."):
+
+                    return relative.replace("\\", "/")
+
+            except Exception:
+
+                pass
+
+        return media_path
+
+    def is_allowed_media_file(
+        self,
+        filename
+    ):
+
+        extension = os.path.splitext(
+            filename or ""
+        )[1].lower()
+
+        return (
+            extension in IMAGE_EXTENSIONS
+            or extension in VIDEO_EXTENSIONS
+        )
+
+    def ensure_current_project(self):
+
+        return bool(
+            self.current_project_dir
+        )
+
+    def require_project_for_desktop_action(self):
+
+        if self.ensure_current_project():
+            return True
+
+        self.show_desktop_project_manager(
+            startup=False
+        )
+
+        if self.ensure_current_project():
+            return True
+
+        return False
+
+    def initialize_project(
+        self,
+        project_dir,
+        create_default_scene=True
+    ):
+
+        self.close_all_players()
+        self.close_all_videos()
+
+        self.set_current_project_dir(
+            project_dir
+        )
+
+        self.scenes = []
+        self.current_scene = None
+        self.selected_face = None
+        self.selected_corner = None
+
+        if create_default_scene:
+
+            self.add_scene(
+                name="Escena 1",
+                ask_name=False
+            )
+
+        else:
+
+            self.update_scene_combo()
+            self.update_scene_label()
+            self.redraw()
+
+    def load_project_by_dir(
+        self,
+        project_dir
+    ):
+
+        self.ensure_project_structure(
+            project_dir
+        )
+
+        self.set_current_project_dir(
+            project_dir
+        )
+
+        if not os.path.exists(self.project_file):
+
+            self.initialize_project(
+                project_dir,
+                create_default_scene=True
+            )
+
+            self.save_project(
+                notify=False
+            )
+
+            return
+
+        self.load_project_from_file(
+            self.project_file
+        )
+
+    def show_desktop_project_manager(
+        self,
+        startup=False
+    ):
+
+        result = {
+            "opened": False
+        }
+
+        dialog = tk.Toplevel(
+            self.root
+        )
+
+        dialog.title(
+            "Proyectos"
+        )
+
+        dialog.geometry(
+            "520x380"
+        )
+
+        self.center_window(
+            dialog,
+            520,
+            380
+        )
+
+        dialog.configure(
+            bg="#202020"
+        )
+
+        dialog.transient(
+            self.root
+        )
+
+        dialog.grab_set()
+
+        tk.Label(
+            dialog,
+            text=(
+                "Selecciona un proyecto para abrir"
+            ),
+            bg="#202020",
+            fg="white"
+        ).pack(
+            pady=(12, 8)
+        )
+
+        listbox = tk.Listbox(
+            dialog,
+            bg="#111111",
+            fg="white",
+            selectbackground="#2d6cdf",
+            activestyle="none"
+        )
+
+        listbox.pack(
+            fill="both",
+            expand=True,
+            padx=12,
+            pady=8
+        )
+
+        def refresh_projects():
+
+            listbox.delete(
+                0,
+                tk.END
+            )
+
+            for project in self.get_project_list():
+
+                listbox.insert(
+                    tk.END,
+                    project["name"]
+                )
+
+        def open_selected_project():
+
+            selection = listbox.curselection()
+
+            if not selection:
+
+                messagebox.showinfo(
+                    "Proyectos",
+                    "Selecciona un proyecto."
+                )
+
+                return
+
+            selected_name = listbox.get(
+                selection[0]
+            )
+
+            selected_path = os.path.join(
+                self.projects_root_dir,
+                selected_name
+            )
+
+            self.load_project_by_dir(
+                selected_path
+            )
+
+            result["opened"] = True
+
+            dialog.destroy()
+
+        def create_project():
+
+            name = simpledialog.askstring(
+                "Nuevo proyecto",
+                "Nombre del proyecto:",
+                parent=dialog
+            )
+
+            if not name:
+                return
+
+            project_dir = self.create_project_folder(
+                name
+            )
+
+            self.initialize_project(
+                project_dir,
+                create_default_scene=True
+            )
+
+            self.save_project(
+                notify=False
+            )
+
+            result["opened"] = True
+
+            dialog.destroy()
+
+        def close_dialog():
+
+            result["opened"] = False
+
+            dialog.destroy()
+
+        controls = tk.Frame(
+            dialog,
+            bg="#202020"
+        )
+
+        controls.pack(
+            fill="x",
+            padx=12,
+            pady=(6, 12)
+        )
+
+        tk.Button(
+            controls,
+            text="Abrir",
+            command=open_selected_project
+        ).pack(
+            side="left",
+            padx=4
+        )
+
+        tk.Button(
+            controls,
+            text="Crear nuevo",
+            command=create_project
+        ).pack(
+            side="left",
+            padx=4
+        )
+
+        tk.Button(
+            controls,
+            text="Cerrar",
+            command=close_dialog
+        ).pack(
+            side="right",
+            padx=4
+        )
+
+        dialog.protocol(
+            "WM_DELETE_WINDOW",
+            close_dialog
+        )
+
+        refresh_projects()
+
+        self.root.wait_window(
+            dialog
+        )
+
+        if result["opened"]:
+
+            self.refresh_desktop_ui()
+
+        return result["opened"]
+
     def new_project(self):
 
         if self.is_execution_mode():
@@ -910,23 +1496,38 @@ class VideoMapper:
 
             return
 
-        self.close_all_players()
+        name = simpledialog.askstring(
+            "Nuevo proyecto",
+            "Nombre del proyecto:",
+            initialvalue="Proyecto",
+            parent=self.root
+        )
 
-        self.close_all_videos()
+        if not name:
+            return
 
-        self.project_file = None
+        project_dir = self.create_project_folder(
+            name
+        )
 
-        self.project_name = "Proyecto"
+        self.initialize_project(
+            project_dir,
+            create_default_scene=True
+        )
 
-        self.scenes = []
-
-        self.add_scene()
+        self.save_project(
+            notify=False
+        )
 
     # =========================================================
     # ESCENAS
     # =========================================================
 
-    def add_scene(self):
+    def add_scene(
+        self,
+        name=None,
+        ask_name=True
+    ):
 
         if self.is_execution_mode():
 
@@ -934,22 +1535,27 @@ class VideoMapper:
 
             return
 
+        if not self.require_project_for_desktop_action():
+            return
+
         scene_number = len(
             self.scenes
         ) + 1
 
-        name = simpledialog.askstring(
-            "Nueva escena",
-            "Nombre de la escena:",
-            initialvalue=f"Escena {scene_number}",
-            parent=self.root
-        )
+        default_name = f"Escena {scene_number}"
+
+        if ask_name:
+
+            name = simpledialog.askstring(
+                "Nueva escena",
+                "Nombre de la escena:",
+                initialvalue=name or default_name,
+                parent=self.root
+            )
 
         if not name:
 
-            name = (
-                f"Escena {scene_number}"
-            )
+            name = default_name
 
         scene = Scene(name)
 
@@ -970,6 +1576,10 @@ class VideoMapper:
         if self.player_windows:
 
             self.show_edit_outputs()
+
+        self.save_project(
+            notify=False
+        )
 
     def delete_selected_scene(self):
 
@@ -1244,6 +1854,7 @@ class VideoMapper:
 
             self.scene_label.config(
                 text=(
+                    f"[{self.project_name}] "
                     f"{self.current_scene.name} -> "
                     f"{screen['name']}"
                 )
@@ -1253,12 +1864,90 @@ class VideoMapper:
     # CARAS
     # =========================================================
 
+    def save_source_file_to_assets(
+        self,
+        source_path
+    ):
+
+        if not source_path:
+            return ""
+
+        if not self.is_allowed_media_file(
+            source_path
+        ):
+
+            raise ValueError(
+                "Formato no permitido."
+            )
+
+        if not self.ensure_current_project():
+
+            raise ValueError(
+                "Debes abrir o crear un proyecto."
+            )
+
+        filename = self.safe_upload_filename(
+            os.path.basename(source_path)
+        )
+
+        target_path = os.path.join(
+            self.current_assets_dir,
+            filename
+        )
+
+        shutil.copy2(
+            source_path,
+            target_path
+        )
+
+        return target_path
+
+    def save_uploaded_file_to_assets(
+        self,
+        uploaded
+    ):
+
+        if uploaded is None:
+            raise ValueError("Archivo inválido.")
+
+        if not self.is_allowed_media_file(
+            uploaded.filename
+        ):
+
+            raise ValueError(
+                "Formato no permitido."
+            )
+
+        if not self.ensure_current_project():
+
+            raise ValueError(
+                "Debes abrir o crear un proyecto."
+            )
+
+        filename = self.safe_upload_filename(
+            uploaded.filename
+        )
+
+        path = os.path.join(
+            self.current_assets_dir,
+            filename
+        )
+
+        uploaded.save(
+            path
+        )
+
+        return path
+
     def add_face(self):
 
         if self.is_execution_mode():
 
             self.warn_execution_mode()
 
+            return
+
+        if not self.require_project_for_desktop_action():
             return
 
         if self.current_scene is None:
@@ -1285,7 +1974,13 @@ class VideoMapper:
 
         self.selected_face = face
 
-        self.change_face_file()
+        if not self.change_face_file():
+
+            self.current_scene.faces.remove(
+                face
+            )
+
+            self.selected_face = None
 
         self.redraw()
 
@@ -1333,13 +2028,34 @@ class VideoMapper:
         )
 
         if not filename:
-            return
+            return False
 
-        face.filename = filename
+        try:
+
+            stored_path = self.save_source_file_to_assets(
+                filename
+            )
+
+        except Exception as e:
+
+            messagebox.showerror(
+                "Archivo",
+                str(e)
+            )
+
+            return False
+
+        face.filename = stored_path
 
         face.load_file()
 
         self.redraw()
+
+        self.save_project(
+            notify=False
+        )
+
+        return True
 
     def delete_selected_face(self):
 
@@ -1991,25 +2707,19 @@ class VideoMapper:
     # GUARDAR
     # =========================================================
 
-    def save_project(self):
+    def save_project(
+        self,
+        notify=True
+    ):
+
+        if not self.ensure_current_project():
+            return
 
         if not self.project_file:
 
-            filename = filedialog.asksaveasfilename(
-                title="Guardar proyecto",
-                defaultextension=".json",
-                filetypes=[
-                    (
-                        "VideoMapper",
-                        "*.json"
-                    )
-                ]
+            self.project_file = self.get_project_file_path(
+                self.current_project_dir
             )
-
-            if not filename:
-                return
-
-            self.project_file = filename
 
         data = {
             "name": self.project_name,
@@ -2034,7 +2744,9 @@ class VideoMapper:
 
                     "points": face.points,
 
-                    "file": face.filename,
+                    "file": self.media_to_stored_path(
+                        face.filename
+                    ),
 
                     "flip_x": face.flip_x,
 
@@ -2062,10 +2774,12 @@ class VideoMapper:
                     ensure_ascii=False
                 )
 
-            messagebox.showinfo(
-                "Proyecto",
-                "Proyecto guardado."
-            )
+            if notify:
+
+                messagebox.showinfo(
+                    "Proyecto",
+                    "Proyecto guardado."
+                )
 
         except Exception as e:
 
@@ -2078,6 +2792,110 @@ class VideoMapper:
     # ABRIR
     # =========================================================
 
+    def load_project_from_file(
+        self,
+        filename
+    ):
+
+        self.close_all_players()
+
+        self.close_all_videos()
+
+        with open(
+            filename,
+            "r",
+            encoding="utf-8"
+        ) as f:
+
+            data = json.load(f)
+
+        project_dir = os.path.dirname(
+            filename
+        )
+
+        self.set_current_project_dir(
+            project_dir
+        )
+
+        self.project_name = data.get(
+            "name",
+            os.path.basename(project_dir)
+        )
+
+        self.scenes = []
+
+        for scene_data in data.get(
+            "scenes",
+            []
+        ):
+
+            scene = Scene(
+                scene_data.get(
+                    "name",
+                    "Escena"
+                ),
+                scene_data.get(
+                    "screen_index",
+                    0
+                )
+            )
+
+            for face_data in scene_data.get(
+                "faces",
+                []
+            ):
+
+                raw_file = face_data.get(
+                    "file",
+                    ""
+                )
+
+                face = Face(
+                    points=face_data.get(
+                        "points"
+                    ),
+                    filename=self.resolve_media_path(
+                        raw_file
+                    ),
+                    flip_x=face_data.get(
+                        "flip_x",
+                        False
+                    ),
+                    flip_y=face_data.get(
+                        "flip_y",
+                        False
+                    )
+                )
+
+                scene.faces.append(
+                    face
+                )
+
+            self.scenes.append(
+                scene
+            )
+
+        if self.scenes:
+
+            self.current_scene = (
+                self.scenes[0]
+            )
+
+        else:
+
+            self.add_scene(
+                name="Escena 1",
+                ask_name=False
+            )
+
+        self.selected_face = None
+
+        self.update_scene_combo()
+
+        self.update_scene_label()
+
+        self.redraw()
+
     def open_project(self):
 
         if self.is_execution_mode():
@@ -2086,126 +2904,80 @@ class VideoMapper:
 
             return
 
-        filename = filedialog.askopenfilename(
-            title="Abrir proyecto",
-            filetypes=[
-                (
-                    "VideoMapper",
-                    "*.json"
-                )
-            ]
-        )
+        if not self.show_desktop_project_manager(
+            startup=False
+        ):
 
-        if not filename:
             return
 
-        try:
+    def get_current_project_info(self):
 
-            self.close_all_players()
+        if not self.current_project_dir:
 
-            self.close_all_videos()
+            return {
+                "name": "",
+                "path": "",
+                "has_project": False
+            }
 
-            with open(
-                filename,
-                "r",
-                encoding="utf-8"
-            ) as f:
-
-                data = json.load(f)
-
-            self.project_file = filename
-
-            self.project_name = data.get(
-                "name",
-                "Proyecto"
-            )
-
-            self.scenes = []
-
-            for scene_data in data.get(
-                "scenes",
-                []
-            ):
-
-                scene = Scene(
-                    scene_data.get(
-                        "name",
-                        "Escena"
-                    ),
-                    scene_data.get(
-                        "screen_index",
-                        0
-                    )
-                )
-
-                for face_data in scene_data.get(
-                    "faces",
-                    []
-                ):
-
-                    face = Face(
-                        points=face_data.get(
-                            "points"
-                        ),
-                        filename=face_data.get(
-                            "file",
-                            ""
-                        ),
-                        flip_x=face_data.get(
-                            "flip_x",
-                            False
-                        ),
-                        flip_y=face_data.get(
-                            "flip_y",
-                            False
-                        )
-                    )
-
-                    scene.faces.append(
-                        face
-                    )
-
-                self.scenes.append(
-                    scene
-                )
-
-            if self.scenes:
-
-                self.current_scene = (
-                    self.scenes[0]
-                )
-
-            else:
-
-                self.add_scene()
-
-            self.selected_face = None
-
-            self.update_scene_combo()
-
-            self.update_scene_label()
-
-            self.redraw()
-
-        except Exception as e:
-
-            messagebox.showerror(
-                "Error",
-                str(e)
-            )
+        return {
+            "name": self.project_name,
+            "path": self.current_project_dir,
+            "has_project": True
+        }
 
     # =========================================================
     # SERVIDOR WEB
     # =========================================================
 
-    def start_web_server(self):
+    def get_local_ip_address(self):
+
+        probe = socket.socket(
+            socket.AF_INET,
+            socket.SOCK_DGRAM
+        )
+
+        try:
+
+            probe.connect((
+                "8.8.8.8",
+                80
+            ))
+
+            ip = probe.getsockname()[0]
+
+            if ip:
+                return ip
+
+        except Exception:
+
+            pass
+
+        finally:
+
+            probe.close()
+
+        return "127.0.0.1"
+
+    def start_web_server(
+        self,
+        notify=True
+    ):
+
+        self.web_host_ip = self.get_local_ip_address()
 
         if self.web_thread and self.web_thread.is_alive():
 
-            messagebox.showinfo(
-                "Web",
-                f"Editor web activo en http://127.0.0.1:{self.web_port}"
-            )
+            if notify:
+
+                messagebox.showinfo(
+                    "Web",
+                    (
+                        "Editor web activo.\n"
+                        f"Local: http://127.0.0.1:{self.web_port}\n"
+                        f"Red: http://{self.web_host_ip}:{self.web_port}"
+                    )
+                )
 
             return
 
@@ -2214,7 +2986,9 @@ class VideoMapper:
             from flask import Flask
 
             app = Flask(
-                __name__
+                __name__,
+                template_folder="templates",
+                static_folder="static"
             )
 
             self.configure_web_routes(
@@ -2236,40 +3010,61 @@ class VideoMapper:
 
             self.web_thread.start()
 
-            messagebox.showinfo(
-                "Web",
-                (
-                    "Editor web activo.\n"
-                    f"Local: http://127.0.0.1:{self.web_port}\n"
-                    f"Red: http://<IP-de-esta-PC>:{self.web_port}"
+            if notify:
+
+                messagebox.showinfo(
+                    "Web",
+                    (
+                        "Editor web activo.\n"
+                        f"Local: http://127.0.0.1:{self.web_port}\n"
+                        f"Red: http://{self.web_host_ip}:{self.web_port}"
+                    )
                 )
-            )
 
         except ImportError:
 
-            messagebox.showerror(
-                "Web",
-                "Flask no está instalado. Instalalo con: pip install flask"
-            )
+            if notify:
+
+                messagebox.showerror(
+                    "Web",
+                    "Flask no está instalado. Instalalo con: pip install flask"
+                )
+
+            else:
+
+                print(
+                    "Flask no está instalado. Instalalo con: pip install flask"
+                )
 
         except Exception as e:
 
-            messagebox.showerror(
-                "Web",
-                str(e)
-            )
+            if notify:
+
+                messagebox.showerror(
+                    "Web",
+                    str(e)
+                )
+
+            else:
+
+                print(
+                    "No se pudo iniciar servidor web:",
+                    e
+                )
 
     def configure_web_routes(
         self,
         app
     ):
 
-        from flask import Response, jsonify, request
+        from flask import Response, jsonify, request, render_template
 
         @app.route("/")
         def web_index():
 
-            return self.get_web_editor_html()
+            return render_template(
+                "index.html"
+            )
 
         @app.route("/api/state")
         def web_state():
@@ -2277,6 +3072,115 @@ class VideoMapper:
             return jsonify(
                 self.get_web_state()
             )
+
+        @app.route("/api/projects")
+        def web_projects():
+
+            projects = [
+                project["name"]
+                for project in self.get_project_list()
+            ]
+
+            return jsonify({
+                "projects": projects,
+                "current": self.project_name if self.current_project_dir else ""
+            })
+
+        @app.route("/api/projects", methods=["POST"])
+        def web_create_project():
+
+            data = request.get_json(
+                silent=True
+            ) or {}
+
+            name = data.get(
+                "name",
+                "Proyecto"
+            )
+
+            def create_in_ui():
+
+                with self.web_lock:
+
+                    project_dir = self.create_project_folder(
+                        name
+                    )
+
+                    self.initialize_project(
+                        project_dir,
+                        create_default_scene=True
+                    )
+
+                    self.save_project(
+                        notify=False
+                    )
+
+            self.run_on_ui_thread(
+                create_in_ui
+            )
+
+            return jsonify(
+                self.get_web_state()
+            )
+
+        @app.route("/api/projects/open", methods=["POST"])
+        def web_open_project():
+
+            data = request.get_json(
+                silent=True
+            ) or {}
+
+            project_name = data.get(
+                "name",
+                ""
+            )
+
+            if not project_name:
+
+                return jsonify({
+                    "ok": False,
+                    "error": "Proyecto inválido."
+                }), 400
+
+            project_dir = os.path.join(
+                self.projects_root_dir,
+                project_name
+            )
+
+            if not os.path.isdir(project_dir):
+
+                return jsonify({
+                    "ok": False,
+                    "error": "Proyecto no encontrado."
+                }), 404
+
+            def open_in_ui():
+
+                with self.web_lock:
+
+                    self.load_project_by_dir(
+                        project_dir
+                    )
+
+            self.run_on_ui_thread(
+                open_in_ui
+            )
+
+            return jsonify(
+                self.get_web_state()
+            )
+
+        @app.route("/api/projects/close", methods=["POST"])
+        def web_close_program():
+
+            self.root.after(
+                0,
+                self.root.destroy
+            )
+
+            return jsonify({
+                "ok": True
+            })
 
         @app.route("/api/scenes", methods=["POST"])
         def web_add_scene():
@@ -2299,6 +3203,14 @@ class VideoMapper:
 
             with self.web_lock:
 
+                if not self.ensure_current_project():
+
+                    return jsonify({
+                        "ok": False,
+                        "project_required": True,
+                        "error": "Debes abrir o crear un proyecto."
+                    }), 409
+
                 scene = Scene(
                     name,
                     screen_index
@@ -2309,6 +3221,10 @@ class VideoMapper:
                 )
 
                 self.current_scene = scene
+
+                self.save_project(
+                    notify=False
+                )
 
             self.schedule_ui_refresh()
 
@@ -2353,6 +3269,10 @@ class VideoMapper:
                 if self.current_scene == scene:
 
                     self.current_scene = self.scenes[0]
+
+                self.save_project(
+                    notify=False
+                )
 
             self.schedule_ui_refresh()
 
@@ -2411,6 +3331,10 @@ class VideoMapper:
                     )
                 )
 
+                self.save_project(
+                    notify=False
+                )
+
             self.schedule_ui_refresh()
 
             return jsonify(
@@ -2420,7 +3344,26 @@ class VideoMapper:
         @app.route("/api/scenes/<int:index>/faces", methods=["POST"])
         def web_add_face(index):
 
+            uploaded = request.files.get(
+                "file"
+            )
+
+            if uploaded is None:
+
+                return jsonify({
+                    "ok": False,
+                    "error": "Debes subir una imagen o video."
+                }), 400
+
             with self.web_lock:
+
+                if not self.ensure_current_project():
+
+                    return jsonify({
+                        "ok": False,
+                        "project_required": True,
+                        "error": "Debes abrir o crear un proyecto."
+                    }), 409
 
                 scene = self.get_scene_by_index(
                     index
@@ -2445,6 +3388,30 @@ class VideoMapper:
 
                 scene.faces.append(
                     face
+                )
+
+                try:
+
+                    path = self.save_uploaded_file_to_assets(
+                        uploaded
+                    )
+
+                except Exception as e:
+
+                    scene.faces.remove(
+                        face
+                    )
+
+                    return jsonify({
+                        "ok": False,
+                        "error": str(e)
+                    }), 400
+
+                face.filename = path
+                face.load_file()
+
+                self.save_project(
+                    notify=False
                 )
 
             self.schedule_ui_refresh()
@@ -2480,6 +3447,10 @@ class VideoMapper:
 
                 scene.faces.remove(
                     face
+                )
+
+                self.save_project(
+                    notify=False
                 )
 
             self.schedule_ui_refresh()
@@ -2530,6 +3501,10 @@ class VideoMapper:
                     for point in points
                 ]
 
+                self.save_project(
+                    notify=False
+                )
+
             self.schedule_ui_refresh()
 
             return jsonify({
@@ -2571,6 +3546,10 @@ class VideoMapper:
 
                     face.flip_y = not face.flip_y
 
+                self.save_project(
+                    notify=False
+                )
+
             self.schedule_ui_refresh()
 
             return jsonify(
@@ -2593,20 +3572,20 @@ class VideoMapper:
                     "ok": False
                 }), 400
 
-            filename = self.safe_upload_filename(
-                uploaded.filename
-            )
-
-            path = os.path.join(
-                self.web_media_dir,
-                filename
-            )
-
-            uploaded.save(
-                path
-            )
-
             with self.web_lock:
+
+                try:
+
+                    path = self.save_uploaded_file_to_assets(
+                        uploaded
+                    )
+
+                except Exception as e:
+
+                    return jsonify({
+                        "ok": False,
+                        "error": str(e)
+                    }), 400
 
                 face = self.get_face_by_index(
                     scene_index,
@@ -2621,6 +3600,10 @@ class VideoMapper:
 
                 face.filename = path
                 face.load_file()
+
+                self.save_project(
+                    notify=False
+                )
 
             self.schedule_ui_refresh()
 
@@ -2654,6 +3637,14 @@ class VideoMapper:
 
         @app.route("/api/control/execute", methods=["POST"])
         def web_execute():
+
+            if not self.ensure_current_project():
+
+                return jsonify({
+                    "ok": False,
+                    "project_required": True,
+                    "error": "Debes abrir o crear un proyecto."
+                }), 409
 
             self.root.after(
                 0,
@@ -2751,6 +3742,44 @@ class VideoMapper:
             self.refresh_desktop_ui
         )
 
+    def run_on_ui_thread(
+        self,
+        callback
+    ):
+
+        done = threading.Event()
+        state = {
+            "error": None,
+            "value": None
+        }
+
+        def wrapper():
+
+            try:
+
+                state["value"] = callback()
+
+            except Exception as e:
+
+                state["error"] = e
+
+            finally:
+
+                done.set()
+
+        self.root.after(
+            0,
+            wrapper
+        )
+
+        done.wait()
+
+        if state["error"] is not None:
+
+            raise state["error"]
+
+        return state["value"]
+
     def refresh_desktop_ui(self):
 
         self.update_scene_combo()
@@ -2804,7 +3833,17 @@ class VideoMapper:
                 "web_control_active": self.web_control_active,
                 "single_screen": len(self.available_screens) <= 1,
                 "canvas_width": self.canvas_width,
-                "canvas_height": self.canvas_height
+                "canvas_height": self.canvas_height,
+                "web_local_url": f"http://127.0.0.1:{self.web_port}",
+                "web_lan_url": f"http://{self.web_host_ip}:{self.web_port}",
+                "project": self.get_current_project_info(),
+                "projects": [
+                    {
+                        "name": project["name"],
+                        "path": project["path"]
+                    }
+                    for project in self.get_project_list()
+                ]
             }
 
     def web_stream_frames(self):
@@ -2887,154 +3926,14 @@ class VideoMapper:
         self.root.deiconify()
         self.root.lift()
 
-    def get_web_editor_html(self):
-
-        return r"""
-<!doctype html>
-<html lang="es">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Video Mapper Web</title>
-<style>
-body{margin:0;background:#111;color:#eee;font-family:Arial,sans-serif}
-#bar{display:flex;gap:8px;align-items:center;padding:8px;background:#202020;flex-wrap:wrap}
-button,select,input{font:inherit}
-button{padding:5px 9px}
-#stage{position:relative;width:100vw;height:calc(100vh - 52px);overflow:hidden;background:#000}
-#stream{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}
-#overlay{position:absolute;inset:0;width:100%;height:100%}
-#menu{position:fixed;display:none;background:#282828;border:1px solid #555;z-index:10;min-width:190px}
-#menu button{display:block;width:100%;background:transparent;color:#eee;border:0;text-align:left;padding:8px}
-#menu button:hover{background:#444}
-</style>
-</head>
-<body>
-<div id="bar">
-  <button onclick="newScene()">+ Escena</button>
-  <select id="sceneSelect" onchange="selectScene()"></select>
-  <button onclick="deleteScene()">Eliminar</button>
-  <select id="screenSelect" onchange="assignScreen()"></select>
-  <button onclick="addFace()">+ Cara</button>
-  <button onclick="executeAll()">Ejecutar</button>
-  <button onclick="exitExecution()">Salir ejecución</button>
-  <button onclick="takeControl()">Tomar control</button>
-  <button onclick="releaseControl()">Soltar control</button>
-  <span id="status"></span>
-</div>
-<div id="stage">
-  <img id="stream" src="/stream/editor">
-  <canvas id="overlay"></canvas>
-</div>
-<div id="menu">
-  <button onclick="pickFile()">Cambiar imagen o video</button>
-  <button onclick="flipFace('x')">Invertir en X</button>
-  <button onclick="flipFace('y')">Invertir en Y</button>
-  <button onclick="deleteFace()">Eliminar cara</button>
-</div>
-<input id="fileInput" type="file" accept="image/*,video/*" hidden onchange="uploadFile()">
-<script>
-let state=null, selectedFace=-1, dragging=-1, menuFace=-1;
-const canvas=document.getElementById('overlay');
-const ctx=canvas.getContext('2d');
-const menu=document.getElementById('menu');
-function api(url, opts={}){return fetch(url, opts).then(r=>r.json());}
-async function loadState(){state=await api('/api/state'); syncControls(); draw();}
-function currentScene(){return state.scenes[state.current_scene_index]||null;}
-function syncControls(){
-  const scenes=document.getElementById('sceneSelect');
-  scenes.innerHTML='';
-  state.scenes.forEach((s,i)=>scenes.add(new Option((i+1)+' - '+s.name,i)));
-  scenes.value=state.current_scene_index;
-  const screens=document.getElementById('screenSelect');
-  screens.innerHTML='';
-  state.screens.forEach((s,i)=>screens.add(new Option(s.name,i)));
-  const scene=currentScene();
-  if(scene) screens.value=scene.screen_index;
-  document.getElementById('status').textContent=
-    state.execution_mode?'Ejecución':(state.web_control_active?'Control web':'Edición');
-}
-function fit(){
-  canvas.width=canvas.clientWidth; canvas.height=canvas.clientHeight;
-}
-function scaleInfo(){
-  const w=state.canvas_width||1280,h=state.canvas_height||720;
-  const s=Math.min(canvas.width/w, canvas.height/h);
-  const ox=(canvas.width-w*s)/2, oy=(canvas.height-h*s)/2;
-  return {s,ox,oy,w,h};
-}
-function toScreen(p){const f=scaleInfo(); return [f.ox+p[0]*f.s,f.oy+p[1]*f.s];}
-function toWorld(x,y){const f=scaleInfo(); return [Math.round((x-f.ox)/f.s),Math.round((y-f.oy)/f.s)];}
-function draw(){
-  fit(); ctx.clearRect(0,0,canvas.width,canvas.height);
-  const scene=currentScene(); if(!scene)return;
-  scene.faces.forEach((face,i)=>{
-    ctx.beginPath();
-    face.points.forEach((p,j)=>{const q=toScreen(p); j?ctx.lineTo(q[0],q[1]):ctx.moveTo(q[0],q[1]);});
-    ctx.closePath(); ctx.strokeStyle=i===selectedFace?'yellow':'cyan'; ctx.lineWidth=2; ctx.stroke();
-    if(i===selectedFace){face.points.forEach(p=>{const q=toScreen(p);ctx.beginPath();ctx.arc(q[0],q[1],8,0,Math.PI*2);ctx.fillStyle='red';ctx.fill();ctx.strokeStyle='white';ctx.stroke();});}
-  });
-}
-function faceAt(x,y){
-  const scene=currentScene(); if(!scene)return -1;
-  for(let i=scene.faces.length-1;i>=0;i--){
-    const pts=scene.faces[i].points.map(toScreen);
-    let inside=false,j=pts.length-1;
-    for(let k=0;k<pts.length;k++){const xi=pts[k][0],yi=pts[k][1],xj=pts[j][0],yj=pts[j][1];
-      if(((yi>y)!=(yj>y))&&(x<(xj-xi)*(y-yi)/(yj-yi+0.00001)+xi))inside=!inside; j=k;}
-    if(inside)return i;
-  }
-  return -1;
-}
-canvas.addEventListener('mousedown',e=>{
-  menu.style.display='none'; if(state.execution_mode)return;
-  const scene=currentScene(); if(!scene)return;
-  const rect=canvas.getBoundingClientRect(),x=e.clientX-rect.left,y=e.clientY-rect.top;
-  if(selectedFace>=0){const face=scene.faces[selectedFace];
-    for(let i=0;i<4;i++){const q=toScreen(face.points[i]); if(Math.hypot(x-q[0],y-q[1])<18){dragging=i;return;}}}
-  selectedFace=faceAt(x,y); draw();
-});
-canvas.addEventListener('mousemove',e=>{
-  if(dragging<0||selectedFace<0||state.execution_mode)return;
-  const rect=canvas.getBoundingClientRect(),p=toWorld(e.clientX-rect.left,e.clientY-rect.top);
-  currentScene().faces[selectedFace].points[dragging]=p; draw();
-});
-canvas.addEventListener('mouseup',async()=>{
-  if(dragging<0||selectedFace<0)return; dragging=-1;
-  await api(`/api/scenes/${state.current_scene_index}/faces/${selectedFace}/points`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({points:currentScene().faces[selectedFace].points})});
-});
-canvas.addEventListener('contextmenu',e=>{
-  e.preventDefault(); if(state.execution_mode)return;
-  const rect=canvas.getBoundingClientRect(); menuFace=faceAt(e.clientX-rect.left,e.clientY-rect.top);
-  if(menuFace<0)return; selectedFace=menuFace; draw();
-  menu.style.left=e.clientX+'px'; menu.style.top=e.clientY+'px'; menu.style.display='block';
-});
-async function selectScene(){await api(`/api/scenes/${document.getElementById('sceneSelect').value}/select`,{method:'POST'}); selectedFace=-1; await loadState();}
-async function newScene(){const name=prompt('Nombre de escena','Escena '+(state.scenes.length+1)); if(!name)return; await api('/api/scenes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})}); await loadState();}
-async function deleteScene(){if(!confirm('¿Eliminar escena?'))return; await api(`/api/scenes/${state.current_scene_index}`,{method:'DELETE'}); selectedFace=-1; await loadState();}
-async function assignScreen(){await api(`/api/scenes/${state.current_scene_index}/screen`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({screen_index:+document.getElementById('screenSelect').value})}); await loadState();}
-async function addFace(){await api(`/api/scenes/${state.current_scene_index}/faces`,{method:'POST'}); await loadState();}
-async function deleteFace(){if(menuFace<0||!confirm('¿Eliminar cara?'))return; await api(`/api/scenes/${state.current_scene_index}/faces/${menuFace}`,{method:'DELETE'}); menu.style.display='none'; selectedFace=-1; await loadState();}
-async function flipFace(axis){if(menuFace<0)return; await api(`/api/scenes/${state.current_scene_index}/faces/${menuFace}/flip`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({axis})}); menu.style.display='none'; await loadState();}
-function pickFile(){document.getElementById('fileInput').click();}
-async function uploadFile(){const f=document.getElementById('fileInput').files[0]; if(!f||menuFace<0)return; const fd=new FormData(); fd.append('file',f); await fetch(`/api/scenes/${state.current_scene_index}/faces/${menuFace}/file`,{method:'POST',body:fd}); menu.style.display='none'; await loadState();}
-async function takeControl(){await api('/api/control/take',{method:'POST'}); setTimeout(loadState,300);}
-async function releaseControl(){await api('/api/control/release',{method:'POST'}); setTimeout(loadState,300);}
-async function executeAll(){await api('/api/control/execute',{method:'POST'}); setTimeout(loadState,300);}
-async function exitExecution(){await api('/api/control/exit',{method:'POST'}); setTimeout(loadState,300);}
-window.addEventListener('resize',draw);
-setInterval(loadState,1500);
-loadState();
-</script>
-</body>
-</html>
-"""
-
     # =========================================================
     # REPRODUCCIÓN
     # =========================================================
 
     def execute_scenes(self):
+
+        if not self.require_project_for_desktop_action():
+            return
 
         if not self.scenes:
             return

@@ -1,0 +1,94 @@
+:root {
+  --panel-bg: rgba(20, 24, 31, 0.92);
+  --panel-border: rgba(120, 137, 165, 0.35);
+  --stage-bg-a: #09101b;
+  --stage-bg-b: #0f1f34;
+  --accent: #31d0aa;
+  --accent-2: #8cd4ff;
+}
+
+body {
+  min-height: 100vh;
+  margin: 0;
+  color: #ecf2ff;
+  background:
+    radial-gradient(circle at 20% 15%, rgba(49, 208, 170, 0.20), transparent 35%),
+    radial-gradient(circle at 80% 10%, rgba(140, 212, 255, 0.20), transparent 30%),
+    linear-gradient(140deg, #08101a 0%, #0d1726 55%, #081019 100%);
+  font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+  overflow: hidden;
+}
+
+.top-shell {
+  backdrop-filter: blur(8px);
+  background: var(--panel-bg);
+  border-bottom: 1px solid var(--panel-border);
+}
+
+.stage-wrap {
+  position: relative;
+  height: calc(100vh - 80px);
+  padding: 0.75rem;
+}
+
+.stage {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  border-radius: 14px;
+  overflow: hidden;
+  border: 1px solid rgba(140, 212, 255, 0.22);
+  background: linear-gradient(160deg, var(--stage-bg-a), var(--stage-bg-b));
+  box-shadow: 0 24px 44px rgba(0, 0, 0, 0.35);
+}
+
+#stream {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #000;
+}
+
+#overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  cursor: crosshair;
+  touch-action: none;
+  user-select: none;
+}
+
+#menu {
+  position: fixed;
+  z-index: 40;
+  min-width: 210px;
+  display: none;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid rgba(140, 212, 255, 0.35);
+  box-shadow: 0 14px 28px rgba(0, 0, 0, 0.35);
+}
+
+#menu .list-group-item {
+  background: #0f1928;
+  color: #e8f6ff;
+  border-color: rgba(140, 212, 255, 0.2);
+  cursor: pointer;
+}
+
+#menu .list-group-item:hover {
+  background: #16273e;
+}
+
+.toolbar-btn {
+  white-space: nowrap;
+}
+
+@media (max-width: 992px) {
+  .stage-wrap {
+    height: calc(100vh - 128px);
+  }
+}
