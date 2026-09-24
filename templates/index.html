@@ -20,8 +20,15 @@
       <button class="btn btn-outline-danger btn-sm toolbar-btn" onclick="deleteScene()">Eliminar</button>
 
       <select id="screenSelect" class="form-select form-select-sm w-auto" onchange="assignScreen()"></select>
+      <select id="orientationSelect" class="form-select form-select-sm w-auto" onchange="assignOrientation()">
+        <option value="horizontal">Horizontal</option>
+        <option value="vertical">Vertical</option>
+        <option value="horizontal_inverted">Horizontal invertida</option>
+        <option value="vertical_inverted">Vertical invertida</option>
+      </select>
       <button class="btn btn-outline-info btn-sm toolbar-btn" onclick="rescaleScene()">Reescalar</button>
       <button class="btn btn-info btn-sm toolbar-btn" onclick="openGallery('add')">+ Cara</button>
+      <button class="btn btn-outline-info btn-sm toolbar-btn" onclick="openGallery('add', 'circle')">+ Círculo</button>
 
       <button class="btn btn-warning btn-sm toolbar-btn" onclick="executeAll()">Ejecutar</button>
       <button class="btn btn-secondary btn-sm toolbar-btn" onclick="exitExecution()">Salir ejecucion</button>
@@ -46,6 +53,7 @@
 
   <div id="menu" class="list-group">
     <button class="list-group-item list-group-item-action" onclick="openGallery('replace')">Cambiar imagen o GIF</button>
+    <button class="list-group-item list-group-item-action" onclick="toggleFaceDepth()">Activar o desactivar profundidad</button>
     <button class="list-group-item list-group-item-action" onclick="flipFace('x')">Invertir en X</button>
     <button class="list-group-item list-group-item-action" onclick="flipFace('y')">Invertir en Y</button>
     <button class="list-group-item list-group-item-action" onclick="rotateFace(5)">Rotar 5 grados a la izquierda</button>

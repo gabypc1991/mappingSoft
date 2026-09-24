@@ -5,6 +5,7 @@ let menuFace = -1;
 let projectsModal = null;
 let galleryModal = null;
 let galleryMode = "add";
+let galleryShape = "rectangle";
 let gallerySelection = null;
 let dragSyncInFlight = false;
 let dragSyncPending = false;
@@ -70,6 +71,7 @@ function syncControls() {
   const scene = currentScene();
   if (scene) {
     screens.value = scene.screen_index;
+    document.getElementById("orientationSelect").value = scene.orientation || "horizontal";
   }
 
   const status = document.getElementById("status");
@@ -160,23 +162,87 @@ function fit() {
   canvas.height = canvas.clientHeight;
 }
 
-function scaleInfo() {
-  const width = state.canvas_width || 1280;
-  const height = state.canvas_height || 720;
+function displayGeometry() {
+  const scene = currentScene();
+  const width = scene.space_width || state.canvas_width || 1280;
+  const height = scene.space_height || state.canvas_height || 720;
   const scale = Math.min(canvas.width / width, canvas.height / height);
-  const offsetX = (canvas.width - width * scale) / 2;
-  const offsetY = (canvas.height - height * scale) / 2;
-  return { scale, offsetX, offsetY, width, height };
+  return {
+    scale,
+    offsetX: (canvas.width - width * scale) / 2,
+    offsetY: (canvas.height - height * scale) / 2,
+    width,
+    height,
+    orientation: scene.orientation || "horizontal"
+  };
 }
 
 function toScreen(point) {
-  const f = scaleInfo();
-  return [f.offsetX + point[0] * f.scale, f.offsetY + point[1] * f.scale];
+  const f = displayGeometry();
+  let [x, y] = point;
+  if (f.orientation === "horizontal_inverted" || f.orientation === "vertical_inverted") {
+    x = f.width - x;
+    y = f.height - y;
+  }
+  return [f.offsetX + x * f.scale, f.offsetY + y * f.scale];
 }
 
 function toWorld(x, y) {
-  const f = scaleInfo();
-  return [Math.round((x - f.offsetX) / f.scale), Math.round((y - f.offsetY) / f.scale)];
+  const f = displayGeometry();
+  let worldX = (x - f.offsetX) / f.scale;
+  let worldY = (y - f.offsetY) / f.scale;
+  if (f.orientation === "horizontal_inverted" || f.orientation === "vertical_inverted") {
+    worldX = f.width - worldX;
+    worldY = f.height - worldY;
+  }
+  return [Math.round(worldX), Math.round(worldY)];
+}
+
+function createProjectiveGuide(points) {
+  const sourcePoints = [[0, 0], [1, 0], [1, 1], [0, 1]];
+  const equations = [];
+
+  sourcePoints.forEach((source, index) => {
+    const [u, v] = source;
+    const [x, y] = points[index];
+    equations.push([u, v, 1, 0, 0, 0, -u * x, -v * x, x]);
+    equations.push([0, 0, 0, u, v, 1, -u * y, -v * y, y]);
+  });
+
+  for (let pivotIndex = 0; pivotIndex < 8; pivotIndex += 1) {
+    let pivotRow = pivotIndex;
+    for (let rowIndex = pivotIndex + 1; rowIndex < 8; rowIndex += 1) {
+      if (Math.abs(equations[rowIndex][pivotIndex]) > Math.abs(equations[pivotRow][pivotIndex])) {
+        pivotRow = rowIndex;
+      }
+    }
+    [equations[pivotIndex], equations[pivotRow]] = [equations[pivotRow], equations[pivotIndex]];
+    const pivot = equations[pivotIndex][pivotIndex];
+    if (Math.abs(pivot) < 1e-8) {
+      return null;
+    }
+    for (let columnIndex = pivotIndex; columnIndex < 9; columnIndex += 1) {
+      equations[pivotIndex][columnIndex] /= pivot;
+    }
+    for (let rowIndex = 0; rowIndex < 8; rowIndex += 1) {
+      if (rowIndex === pivotIndex) {
+        continue;
+      }
+      const factor = equations[rowIndex][pivotIndex];
+      for (let columnIndex = pivotIndex; columnIndex < 9; columnIndex += 1) {
+        equations[rowIndex][columnIndex] -= factor * equations[pivotIndex][columnIndex];
+      }
+    }
+  }
+
+  const coefficients = equations.map((equation) => equation[8]);
+  return (u, v) => {
+    const divisor = coefficients[6] * u + coefficients[7] * v + 1;
+    return [
+      (coefficients[0] * u + coefficients[1] * v + coefficients[2]) / divisor,
+      (coefficients[3] * u + coefficients[4] * v + coefficients[5]) / divisor
+    ];
+  };
 }
 
 function draw() {
@@ -188,10 +254,21 @@ function draw() {
     return;
   }
 
+  const geometry = displayGeometry();
+  ctx.strokeStyle = "#ffffff";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(
+    geometry.offsetX,
+    geometry.offsetY,
+    geometry.width * geometry.scale,
+    geometry.height * geometry.scale
+  );
+
   scene.faces.forEach((face, index) => {
+    const screenPoints = face.points.map(toScreen);
     ctx.beginPath();
-    face.points.forEach((point, pointIndex) => {
-      const p = toScreen(point);
+    screenPoints.forEach((point, pointIndex) => {
+      const p = point;
       if (pointIndex === 0) {
         ctx.moveTo(p[0], p[1]);
       } else {
@@ -202,6 +279,71 @@ function draw() {
     ctx.strokeStyle = index === selectedFace ? "#ffe066" : "#49ffd6";
     ctx.lineWidth = 2;
     ctx.stroke();
+
+    ctx.strokeStyle = "#8cd4ff";
+    ctx.lineWidth = 1;
+    if (face.shape === "circle") {
+      const guidePoint = createProjectiveGuide(screenPoints);
+
+      if (!guidePoint) {
+        return;
+      }
+
+      [0.25, 0.5, 0.75, 1].forEach((radius) => {
+        ctx.beginPath();
+        for (let step = 0; step <= 32; step += 1) {
+          const angle = Math.PI * 2 * step / 32;
+          const point = guidePoint(
+            0.5 + Math.cos(angle) * radius * 0.5,
+            0.5 + Math.sin(angle) * radius * 0.5
+          );
+          if (step === 0) {
+            ctx.moveTo(point[0], point[1]);
+          } else {
+            ctx.lineTo(point[0], point[1]);
+          }
+        }
+        ctx.stroke();
+      });
+
+      for (let step = 0; step < 8; step += 1) {
+        const angle = Math.PI * 2 * step / 8;
+        const outer = guidePoint(
+          0.5 + Math.cos(angle) * 0.5,
+          0.5 + Math.sin(angle) * 0.5
+        );
+        const center = guidePoint(0.5, 0.5);
+        ctx.beginPath();
+        ctx.moveTo(center[0], center[1]);
+        ctx.lineTo(outer[0], outer[1]);
+        ctx.stroke();
+      }
+    } else {
+      [0.25, 0.5, 0.75].forEach((fraction) => {
+        const top = [
+          screenPoints[0][0] + (screenPoints[1][0] - screenPoints[0][0]) * fraction,
+          screenPoints[0][1] + (screenPoints[1][1] - screenPoints[0][1]) * fraction
+        ];
+        const bottom = [
+          screenPoints[3][0] + (screenPoints[2][0] - screenPoints[3][0]) * fraction,
+          screenPoints[3][1] + (screenPoints[2][1] - screenPoints[3][1]) * fraction
+        ];
+        const left = [
+          screenPoints[0][0] + (screenPoints[3][0] - screenPoints[0][0]) * fraction,
+          screenPoints[0][1] + (screenPoints[3][1] - screenPoints[0][1]) * fraction
+        ];
+        const right = [
+          screenPoints[1][0] + (screenPoints[2][0] - screenPoints[1][0]) * fraction,
+          screenPoints[1][1] + (screenPoints[2][1] - screenPoints[1][1]) * fraction
+        ];
+        ctx.beginPath();
+        ctx.moveTo(top[0], top[1]);
+        ctx.lineTo(bottom[0], bottom[1]);
+        ctx.moveTo(left[0], left[1]);
+        ctx.lineTo(right[0], right[1]);
+        ctx.stroke();
+      });
+    }
 
     if (index === selectedFace) {
       face.points.forEach((point) => {
@@ -496,6 +638,15 @@ async function assignScreen() {
   await loadState();
 }
 
+async function assignOrientation() {
+  await api("/api/scenes/" + state.current_scene_index + "/orientation", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ orientation: document.getElementById("orientationSelect").value })
+  });
+  await loadState();
+}
+
 async function rescaleScene() {
   await api("/api/scenes/" + state.current_scene_index + "/rescale", {
     method: "POST",
@@ -517,6 +668,24 @@ async function deleteFace() {
   await api("/api/scenes/" + state.current_scene_index + "/faces/" + menuFace, { method: "DELETE" });
   menu.style.display = "none";
   selectedFace = -1;
+  await loadState();
+}
+
+async function toggleFaceDepth() {
+  if (menuFace < 0) {
+    return;
+  }
+
+  const face = currentScene().faces[menuFace];
+  await api("/api/scenes/" + state.current_scene_index + "/faces/" + menuFace + "/depth", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      enabled: !face.depth_point,
+      depth_point: [0.5, 0.25]
+    })
+  });
+  menu.style.display = "none";
   await loadState();
 }
 
@@ -548,7 +717,7 @@ async function rotateFace(degrees) {
   await loadState();
 }
 
-async function openGallery(mode) {
+async function openGallery(mode, shape = "rectangle") {
   if (!state || state.execution_mode) {
     return;
   }
@@ -557,8 +726,11 @@ async function openGallery(mode) {
   }
 
   galleryMode = mode;
+  galleryShape = shape;
   gallerySelection = null;
-  document.getElementById("galleryUseButton").textContent = mode === "add" ? "+ Cara" : "Usar";
+  document.getElementById("galleryUseButton").textContent = mode === "add"
+    ? (shape === "circle" ? "+ Círculo" : "+ Cara")
+    : "Usar";
   document.getElementById("galleryUploadButton").hidden = mode === "replace";
   document.getElementById("galleryDeleteButton").hidden = mode === "replace";
   await loadGallery();
@@ -621,6 +793,7 @@ async function useGalleryItem() {
   const payload = {
     filename: gallerySelection,
     mode: galleryMode,
+    shape: galleryShape,
     scene_index: state.current_scene_index
   };
   if (galleryMode === "replace") {

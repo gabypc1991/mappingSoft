@@ -1,6 +1,7 @@
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 import json
+import math
 import os
 import re
 import shutil
@@ -60,7 +61,9 @@ class Face:
         filename="",
         flip_x=False,
         flip_y=False,
-        rotation_degrees=0
+        rotation_degrees=0,
+        shape="rectangle",
+        depth_point=None
     ):
 
         self.points = points or [
@@ -75,6 +78,8 @@ class Face:
         self.flip_x = flip_x
         self.flip_y = flip_y
         self.rotation_degrees = rotation_degrees % 360
+        self.shape = "circle" if shape == "circle" else "rectangle"
+        self.depth_point = depth_point
 
         self.image = None
 
@@ -245,13 +250,15 @@ class Scene:
         name="Escena 1",
         screen_index=0,
         space_width=None,
-        space_height=None
+        space_height=None,
+        orientation="horizontal"
     ):
 
         self.name = name
         self.screen_index = screen_index
         self.space_width = space_width
         self.space_height = space_height
+        self.orientation = orientation
         self.faces = []
 
 
@@ -290,6 +297,7 @@ class VideoMapper:
         self.selected_corner = None
 
         self.dragging = False
+        self.dragging_depth = False
 
         self.canvas_width = 1280
         self.canvas_height = 720
@@ -597,6 +605,21 @@ class VideoMapper:
             screen_index
         ]
 
+    def get_scene_orientation(self, scene):
+
+        orientation = getattr(scene, "orientation", "horizontal")
+
+        if orientation not in (
+            "horizontal",
+            "vertical",
+            "horizontal_inverted",
+            "vertical_inverted"
+        ):
+
+            return "horizontal"
+
+        return orientation
+
     def get_target_scene_space(
         self,
         scene=None
@@ -626,6 +649,11 @@ class VideoMapper:
             )
 
             if width > 1 and height > 1:
+
+                if self.get_scene_orientation(scene).startswith("vertical"):
+
+                    width, height = height, width
+
                 return width, height
 
         width = int(self.canvas_width)
@@ -967,6 +995,32 @@ class VideoMapper:
             pady=5
         )
 
+        self.orientation_labels = {
+            "horizontal": "Horizontal",
+            "vertical": "Vertical",
+            "horizontal_inverted": "Horizontal invertida",
+            "vertical_inverted": "Vertical invertida"
+        }
+        self.orientation_values = {
+            label: value
+            for value, label in self.orientation_labels.items()
+        }
+        self.orientation_combo = ttk.Combobox(
+            self.top,
+            state="readonly",
+            width=20,
+            values=list(self.orientation_values.keys())
+        )
+        self.orientation_combo.pack(
+            side="left",
+            padx=4,
+            pady=5
+        )
+        self.orientation_combo.bind(
+            "<<ComboboxSelected>>",
+            self.assign_selected_orientation
+        )
+
         tk.Button(
             self.top,
             text="Reescalar",
@@ -989,8 +1043,8 @@ class VideoMapper:
 
         tk.Button(
             self.top,
-            text="Salir ejecución",
-            command=self.exit_execution_mode
+            text="Modo edición",
+            command=self.enter_edit_mode
         ).pack(
             side="left",
             padx=4,
@@ -1019,6 +1073,16 @@ class VideoMapper:
 
         tk.Button(
             self.top,
+            text="+ Círculo",
+            command=self.add_circular_face
+        ).pack(
+            side="left",
+            padx=4,
+            pady=5
+        )
+
+        tk.Button(
+            self.top,
             text="Galería",
             command=lambda: self.open_gallery("add")
         ).pack(
@@ -1031,16 +1095,6 @@ class VideoMapper:
             self.top,
             text="Archivo",
             command=self.change_face_file
-        ).pack(
-            side="left",
-            padx=4,
-            pady=5
-        )
-
-        tk.Button(
-            self.top,
-            text="Reproducir",
-            command=self.execute_scenes
         ).pack(
             side="left",
             padx=4,
@@ -1293,7 +1347,7 @@ class VideoMapper:
         if os.path.isfile(path):
             os.remove(path)
 
-    def open_gallery(self, mode, face=None):
+    def open_gallery(self, mode, face=None, shape="rectangle"):
 
         if self.is_execution_mode():
             self.warn_execution_mode()
@@ -1336,14 +1390,14 @@ class VideoMapper:
                 messagebox.showerror("Galería", str(error))
                 return
             gallery.destroy()
-            self.open_gallery(mode, face)
+            self.open_gallery(mode, face, shape)
 
         def delete_selected():
             if not selected["path"]:
                 return
             self.delete_gallery_item(os.path.basename(selected["path"]))
             gallery.destroy()
-            self.open_gallery(mode, face)
+            self.open_gallery(mode, face, shape)
 
         def use_selected():
             if not selected["path"]:
@@ -1357,7 +1411,7 @@ class VideoMapper:
                 return
 
             if mode == "add":
-                new_face = Face()
+                new_face = Face(shape=shape)
                 offset = len(self.current_scene.faces) * 30
                 new_face.points = [
                     [300 + offset, 200 + offset],
@@ -2192,6 +2246,18 @@ class VideoMapper:
             screen_index
         )
 
+        if hasattr(self, "orientation_combo"):
+
+            selected_scene = scene or self.current_scene
+
+            if selected_scene is not None:
+
+                self.orientation_combo.set(
+                    self.orientation_labels[
+                        self.get_scene_orientation(selected_scene)
+                    ]
+                )
+
     def get_selected_scene_index(self):
 
         if not hasattr(
@@ -2342,6 +2408,44 @@ class VideoMapper:
                 scene
             )
 
+    def assign_selected_orientation(self, event=None):
+
+        if self.is_execution_mode():
+
+            self.warn_execution_mode()
+
+            return
+
+        scene = self.get_selected_scene()
+
+        if scene is None:
+            return
+
+        previous_width = int(scene.space_width or 0)
+        previous_height = int(scene.space_height or 0)
+
+        if previous_width <= 1 or previous_height <= 1:
+
+            previous_width, previous_height = self.get_scene_space(scene)
+
+        scene.orientation = self.orientation_values.get(
+            self.orientation_combo.get(),
+            "horizontal"
+        )
+
+        self.adapt_scene_to_assigned_screen(
+            scene,
+            source_width=previous_width,
+            source_height=previous_height,
+            force=True
+        )
+
+        self.current_scene = scene
+        self.update_screen_combo_selection(scene)
+        self.update_scene_label()
+        self.redraw()
+        self.save_project(notify=False)
+
     def update_scene_label(self):
 
         if self.current_scene:
@@ -2453,7 +2557,23 @@ class VideoMapper:
         if self.current_scene is None:
             return
 
-        self.open_gallery("add")
+        self.open_gallery("add", shape="rectangle")
+
+    def add_circular_face(self):
+
+        if self.is_execution_mode():
+
+            self.warn_execution_mode()
+
+            return
+
+        if not self.require_project_for_desktop_action():
+            return
+
+        if self.current_scene is None:
+            return
+
+        self.open_gallery("add", shape="circle")
 
     def change_face_file(self):
 
@@ -2558,6 +2678,27 @@ class VideoMapper:
             face.rotation_degrees + degrees
         ) % 360
 
+        self.redraw()
+
+    def toggle_selected_face_depth(self):
+
+        if self.is_execution_mode():
+
+            self.warn_execution_mode()
+
+            return
+
+        face = self.selected_face
+
+        if face is None:
+            return
+
+        if face.depth_point is None:
+            face.depth_point = [0.5, 0.25]
+        else:
+            face.depth_point = None
+
+        self.save_project(notify=False)
         self.redraw()
 
     def toggle_selected_face_flip(
@@ -2689,6 +2830,52 @@ class VideoMapper:
 
         return frame
 
+    def apply_face_depth(self, frame, face):
+
+        if face.depth_point is None:
+            return frame
+
+        depth_x, depth_y = face.depth_point
+        direction_x = depth_x - 0.5
+        direction_y = depth_y - 0.5
+        distance = (direction_x ** 2 + direction_y ** 2) ** 0.5
+
+        if distance < 0.001:
+            return frame
+
+        direction_x /= distance
+        direction_y /= distance
+        strength = min(distance / 0.5, 0.9)
+        frame_height, frame_width = frame.shape[:2]
+        grid_x, grid_y = np.meshgrid(
+            np.linspace(0, 1, frame_width, dtype=np.float32),
+            np.linspace(0, 1, frame_height, dtype=np.float32)
+        )
+        centered_x = grid_x - 0.5
+        centered_y = grid_y - 0.5
+
+        if face.shape == "circle":
+            radius = np.sqrt(centered_x ** 2 + centered_y ** 2) * 2
+            falloff = np.clip(1 - radius ** 2, 0, 1)
+        else:
+            falloff = np.clip(
+                1 - np.maximum(np.abs(centered_x), np.abs(centered_y)) * 2,
+                0,
+                1
+            )
+
+        displacement = strength * falloff * 0.18
+        map_x = (grid_x - direction_x * displacement) * (frame_width - 1)
+        map_y = (grid_y - direction_y * displacement) * (frame_height - 1)
+
+        return cv2.remap(
+            frame,
+            map_x.astype(np.float32),
+            map_y.astype(np.float32),
+            cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_REPLICATE
+        )
+
     # =========================================================
     # CREAR IMAGEN DE LA ESCENA
     # =========================================================
@@ -2698,7 +2885,8 @@ class VideoMapper:
         width,
         height,
         scene=None,
-        playback=False
+        playback=False,
+        show_screen_border=False
     ):
 
         output = np.zeros(
@@ -2721,28 +2909,38 @@ class VideoMapper:
             scene
         )
 
-        sx = width / editor_width
-        sy = height / editor_height
+        scale = min(
+            width / editor_width,
+            height / editor_height
+        )
+        offset_x = (width - editor_width * scale) / 2
+        offset_y = (height - editor_height * scale) / 2
+        orientation = self.get_scene_orientation(scene)
+
+        def to_output(point):
+
+            x, y = point
+
+            if orientation in (
+                "horizontal_inverted",
+                "vertical_inverted"
+            ):
+
+                x = editor_width - x
+                y = editor_height - y
+
+            return [
+                offset_x + x * scale,
+                offset_y + y * scale
+            ]
+
+        guide_faces = []
 
         for face in scene.faces:
 
             destination_points = np.float32([
-                [
-                    face.points[0][0] * sx,
-                    face.points[0][1] * sy
-                ],
-                [
-                    face.points[1][0] * sx,
-                    face.points[1][1] * sy
-                ],
-                [
-                    face.points[2][0] * sx,
-                    face.points[2][1] * sy
-                ],
-                [
-                    face.points[3][0] * sx,
-                    face.points[3][1] * sy
-                ]
+                to_output(point)
+                for point in face.points
             ])
 
             polygon = np.int32(
@@ -2760,6 +2958,9 @@ class VideoMapper:
 
             if x1 <= x0 or y1 <= y0:
                 continue
+
+            if show_screen_border:
+                guide_faces.append((face, destination_points))
 
             # Cachea caras estáticas para evitar recalcular perspectiva cada frame.
             can_cache = (
@@ -2783,6 +2984,8 @@ class VideoMapper:
                 face.flip_x,
                 face.flip_y,
                 face.rotation_degrees,
+                face.shape,
+                tuple(face.depth_point) if face.depth_point else None,
                 face.is_animated,
                 playback,
                 destination_key
@@ -2811,6 +3014,8 @@ class VideoMapper:
 
                 if frame is None:
                     continue
+
+                frame = self.apply_face_depth(frame, face)
 
                 frame_height, frame_width = frame.shape[:2]
 
@@ -2861,6 +3066,47 @@ class VideoMapper:
                     255
                 )
 
+                if face.shape == "circle":
+
+                    source_mask = np.zeros(
+                        (
+                            frame_height,
+                            frame_width
+                        ),
+                        dtype=np.uint8
+                    )
+
+                    cv2.ellipse(
+                        source_mask,
+                        (
+                            frame_width // 2,
+                            frame_height // 2
+                        ),
+                        (
+                            frame_width // 2,
+                            frame_height // 2
+                        ),
+                        0,
+                        0,
+                        360,
+                        255,
+                        -1
+                    )
+
+                    circular_mask = cv2.warpPerspective(
+                        source_mask,
+                        matrix,
+                        (
+                            x1 - x0,
+                            y1 - y0
+                        )
+                    )
+
+                    mask = cv2.bitwise_and(
+                        mask,
+                        circular_mask
+                    )
+
                 mask = mask == 255
 
                 if can_cache:
@@ -2885,6 +3131,80 @@ class VideoMapper:
             ] = warped[
                 mask
             ]
+
+        if show_screen_border:
+
+            guide_color = (255, 212, 140)
+
+            for face, guide_points in guide_faces:
+
+                if face.shape == "circle":
+
+                    guide_matrix = cv2.getPerspectiveTransform(
+                        np.float32([[0, 0], [1, 0], [1, 1], [0, 1]]),
+                        guide_points
+                    )
+
+                    for radius in (0.25, 0.5, 0.75, 1.0):
+                        source_circle = np.float32([[
+                            [
+                                0.5 + math.cos(math.tau * step / 32) * radius * 0.5,
+                                0.5 + math.sin(math.tau * step / 32) * radius * 0.5
+                            ]
+                            for step in range(33)
+                        ]])
+                        projected_circle = cv2.perspectiveTransform(
+                            source_circle,
+                            guide_matrix
+                        ).astype(np.int32)
+                        cv2.polylines(
+                            output,
+                            [projected_circle],
+                            False,
+                            guide_color,
+                            1,
+                            cv2.LINE_AA
+                        )
+
+                    center = cv2.perspectiveTransform(
+                        np.float32([[[0.5, 0.5]]]),
+                        guide_matrix
+                    )[0][0].astype(np.int32)
+
+                    for step in range(8):
+                        angle = math.tau * step / 8
+                        edge = cv2.perspectiveTransform(
+                            np.float32([[[
+                                0.5 + math.cos(angle) * 0.5,
+                                0.5 + math.sin(angle) * 0.5
+                            ]]]),
+                            guide_matrix
+                        )[0][0].astype(np.int32)
+                        cv2.line(output, center, edge, guide_color, 1, cv2.LINE_AA)
+
+                else:
+
+                    for fraction in (0.25, 0.5, 0.75):
+                        top = guide_points[0] + (guide_points[1] - guide_points[0]) * fraction
+                        bottom = guide_points[3] + (guide_points[2] - guide_points[3]) * fraction
+                        left = guide_points[0] + (guide_points[3] - guide_points[0]) * fraction
+                        right = guide_points[1] + (guide_points[2] - guide_points[1]) * fraction
+                        cv2.line(output, top.astype(np.int32), bottom.astype(np.int32), guide_color, 1, cv2.LINE_AA)
+                        cv2.line(output, left.astype(np.int32), right.astype(np.int32), guide_color, 1, cv2.LINE_AA)
+
+            cv2.rectangle(
+                output,
+                (
+                    int(round(offset_x)),
+                    int(round(offset_y))
+                ),
+                (
+                    int(round(offset_x + editor_width * scale)) - 1,
+                    int(round(offset_y + editor_height * scale)) - 1
+                ),
+                (255, 255, 255),
+                2
+            )
 
         return output
 
@@ -2933,10 +3253,12 @@ class VideoMapper:
             1
         )
 
-        scale_x = canvas_width / scene_width
-        scale_y = canvas_height / scene_height
+        scale = min(
+            canvas_width / scene_width,
+            canvas_height / scene_height
+        )
 
-        return scale_x, scale_y, scene_width, scene_height
+        return scale, scale, scene_width, scene_height
 
     def scene_to_canvas_point(
         self,
@@ -2949,7 +3271,19 @@ class VideoMapper:
             scene
         )
 
-        return x * scale_x, y * scale_y
+        scene_width, scene_height = self.get_scene_space(scene)
+        offset_x = (self.canvas_width - scene_width * scale_x) / 2
+        offset_y = (self.canvas_height - scene_height * scale_y) / 2
+
+        if self.get_scene_orientation(scene) in (
+            "horizontal_inverted",
+            "vertical_inverted"
+        ):
+
+            x = scene_width - x
+            y = scene_height - y
+
+        return offset_x + x * scale_x, offset_y + y * scale_y
 
     def canvas_to_scene_point(
         self,
@@ -2962,8 +3296,18 @@ class VideoMapper:
             scene
         )
 
-        scene_x = int(round(x / scale_x))
-        scene_y = int(round(y / scale_y))
+        offset_x = (self.canvas_width - scene_width * scale_x) / 2
+        offset_y = (self.canvas_height - scene_height * scale_y) / 2
+        scene_x = int(round((x - offset_x) / scale_x))
+        scene_y = int(round((y - offset_y) / scale_y))
+
+        if self.get_scene_orientation(scene) in (
+            "horizontal_inverted",
+            "vertical_inverted"
+        ):
+
+            scene_x = scene_width - scene_x
+            scene_y = scene_height - scene_y
 
         scene_x = min(
             max(scene_x, 0),
@@ -2999,6 +3343,14 @@ class VideoMapper:
 
         self.canvas.delete(
             "corner"
+        )
+
+        self.canvas.delete(
+            "face_grid"
+        )
+
+        self.canvas.delete(
+            "screen_border"
         )
 
         self.canvas_width = (
@@ -3051,6 +3403,22 @@ class VideoMapper:
         # Bordes y esquinas
         if self.current_scene:
 
+            scale_x, scale_y, scene_width, scene_height = self.get_editor_transform(
+                self.current_scene
+            )
+            offset_x = (self.canvas_width - scene_width * scale_x) / 2
+            offset_y = (self.canvas_height - scene_height * scale_y) / 2
+
+            self.canvas.create_rectangle(
+                offset_x,
+                offset_y,
+                offset_x + scene_width * scale_x,
+                offset_y + scene_height * scale_y,
+                outline="white",
+                width=2,
+                tags="screen_border"
+            )
+
             for face in self.current_scene.faces:
 
                 points = []
@@ -3084,7 +3452,149 @@ class VideoMapper:
                     tags="face_border"
                 )
 
+                canvas_points = [
+                    (points[index], points[index + 1])
+                    for index in range(0, len(points), 2)
+                ]
+
+                if face.shape == "circle":
+
+                    guide_matrix = cv2.getPerspectiveTransform(
+                        np.float32([
+                            [0, 0],
+                            [1, 0],
+                            [1, 1],
+                            [0, 1]
+                        ]),
+                        np.float32(face.points)
+                    )
+
+                    def guide_point(u, v):
+                        projected = cv2.perspectiveTransform(
+                            np.float32([[[u, v]]]),
+                            guide_matrix
+                        )[0][0]
+                        return self.scene_to_canvas_point(
+                            projected[0],
+                            projected[1],
+                            self.current_scene
+                        )
+
+                    for radius in (0.25, 0.5, 0.75, 1.0):
+                        circle_points = []
+
+                        for step in range(33):
+                            angle = math.tau * step / 32
+                            circle_points.extend(guide_point(
+                                0.5 + math.cos(angle) * radius * 0.5,
+                                0.5 + math.sin(angle) * radius * 0.5
+                            ))
+
+                        self.canvas.create_line(
+                            circle_points,
+                            fill="#8cd4ff",
+                            width=1,
+                            tags="face_grid"
+                        )
+
+                    for step in range(8):
+                        angle = math.tau * step / 8
+                        self.canvas.create_line(
+                            guide_point(0.5, 0.5),
+                            guide_point(
+                                0.5 + math.cos(angle) * 0.5,
+                                0.5 + math.sin(angle) * 0.5
+                            ),
+                            fill="#8cd4ff",
+                            width=1,
+                            tags="face_grid"
+                        )
+
+                else:
+
+                    for fraction in (0.25, 0.5, 0.75):
+
+                        top = (
+                            canvas_points[0][0] + (canvas_points[1][0] - canvas_points[0][0]) * fraction,
+                            canvas_points[0][1] + (canvas_points[1][1] - canvas_points[0][1]) * fraction
+                        )
+                        bottom = (
+                            canvas_points[3][0] + (canvas_points[2][0] - canvas_points[3][0]) * fraction,
+                            canvas_points[3][1] + (canvas_points[2][1] - canvas_points[3][1]) * fraction
+                        )
+                        left = (
+                            canvas_points[0][0] + (canvas_points[3][0] - canvas_points[0][0]) * fraction,
+                            canvas_points[0][1] + (canvas_points[3][1] - canvas_points[0][1]) * fraction
+                        )
+                        right = (
+                            canvas_points[1][0] + (canvas_points[2][0] - canvas_points[1][0]) * fraction,
+                            canvas_points[1][1] + (canvas_points[2][1] - canvas_points[1][1]) * fraction
+                        )
+
+                        self.canvas.create_line(
+                            top,
+                            bottom,
+                            fill="#8cd4ff",
+                            width=1,
+                            tags="face_grid"
+                        )
+                        self.canvas.create_line(
+                            left,
+                            right,
+                            fill="#8cd4ff",
+                            width=1,
+                            tags="face_grid"
+                        )
+
                 if face == self.selected_face:
+
+                    if face.depth_point is not None:
+
+                        left_scene = self.get_face_normalized_scene_point(
+                            face,
+                            0,
+                            0.5
+                        )
+                        right_scene = self.get_face_normalized_scene_point(
+                            face,
+                            1,
+                            0.5
+                        )
+                        left_canvas = self.scene_to_canvas_point(
+                            left_scene[0],
+                            left_scene[1],
+                            self.current_scene
+                        )
+                        right_canvas = self.scene_to_canvas_point(
+                            right_scene[0],
+                            right_scene[1],
+                            self.current_scene
+                        )
+                        depth_canvas = self.get_face_depth_canvas_point(face)
+                        depth_color = (
+                            "#ff9f1c"
+                            if face.depth_point[1] < 0.5
+                            else "#8e7dff"
+                        )
+
+                        self.canvas.create_line(
+                            left_canvas,
+                            right_canvas,
+                            fill="#ffffff",
+                            width=1,
+                            dash=(4, 4),
+                            tags="depth_guide"
+                        )
+                        self.canvas.create_oval(
+                            depth_canvas[0] - 9,
+                            depth_canvas[1] - 9,
+                            depth_canvas[0] + 9,
+                            depth_canvas[1] + 9,
+                            fill=depth_color,
+                            outline="white",
+                            width=2,
+                            tags="depth_guide"
+                        )
 
                     for x, y in face.points:
 
@@ -3106,6 +3616,8 @@ class VideoMapper:
                             width=2,
                             tags="corner"
                         )
+
+                self.canvas.tag_raise("screen_border")
 
     # =========================================================
     # MOUSE
@@ -3173,6 +3685,15 @@ class VideoMapper:
         menu.add_command(
             label="Cambiar imagen o GIF",
             command=self.change_face_file
+        )
+
+        menu.add_command(
+            label=(
+                "Desactivar profundidad"
+                if face.depth_point is not None
+                else "Activar profundidad"
+            ),
+            command=self.toggle_selected_face_depth
         )
 
         menu.add_separator()
@@ -3249,6 +3770,19 @@ class VideoMapper:
         # Buscar esquina
         if self.selected_face:
 
+            if self.selected_face.depth_point is not None:
+
+                depth_x, depth_y = self.get_face_depth_canvas_point(
+                    self.selected_face
+                )
+
+                if ((event.x - depth_x) ** 2 + (event.y - depth_y) ** 2) ** 0.5 < 20:
+
+                    self.dragging_depth = True
+                    self.dragging = True
+
+                    return
+
             for index, (
                 x,
                 y
@@ -3310,6 +3844,24 @@ class VideoMapper:
         if self.selected_face is None:
             return
 
+        if self.dragging_depth:
+
+            scene_x, scene_y = self.canvas_to_scene_point(
+                event.x,
+                event.y,
+                self.current_scene
+            )
+
+            self.selected_face.depth_point = self.get_face_depth_from_scene_point(
+                self.selected_face,
+                scene_x,
+                scene_y
+            )
+
+            self.redraw()
+
+            return
+
         if self.selected_corner is None:
             return
 
@@ -3337,10 +3889,92 @@ class VideoMapper:
             return
 
         self.dragging = False
+        self.dragging_depth = False
+        self.save_project(notify=False)
 
     # =========================================================
     # GEOMETRÍA
     # =========================================================
+
+    def get_face_depth_scene_point(self, face):
+
+        if face.depth_point is None:
+            return None
+
+        return self.get_face_normalized_scene_point(
+            face,
+            face.depth_point[0],
+            face.depth_point[1]
+        )
+
+    def get_face_normalized_scene_point(self, face, normalized_x, normalized_y):
+
+        matrix = cv2.getPerspectiveTransform(
+            np.float32([[0, 0], [1, 0], [1, 1], [0, 1]]),
+            np.float32(face.points)
+        )
+        point = cv2.perspectiveTransform(
+            np.float32([[[normalized_x, normalized_y]]]),
+            matrix
+        )[0][0]
+
+        return point[0], point[1]
+
+    def get_face_depth_canvas_point(self, face):
+
+        scene_point = self.get_face_depth_scene_point(face)
+
+        return self.scene_to_canvas_point(
+            scene_point[0],
+            scene_point[1],
+            self.current_scene
+        )
+
+    def get_face_depth_from_scene_point(self, face, scene_x, scene_y):
+
+        matrix = cv2.getPerspectiveTransform(
+            np.float32(face.points),
+            np.float32([[0, 0], [1, 0], [1, 1], [0, 1]])
+        )
+        point = cv2.perspectiveTransform(
+            np.float32([[[scene_x, scene_y]]]),
+            matrix
+        )[0][0]
+        depth_x = min(max(float(point[0]), 0), 1)
+        depth_y = min(max(float(point[1]), 0), 1)
+
+        if face.shape == "circle":
+            offset_x = depth_x - 0.5
+            offset_y = depth_y - 0.5
+            distance = (offset_x ** 2 + offset_y ** 2) ** 0.5
+
+            if distance > 0.5:
+                depth_x = 0.5 + offset_x * 0.5 / distance
+                depth_y = 0.5 + offset_y * 0.5 / distance
+
+        return [depth_x, depth_y]
+
+    def normalize_face_depth_point(self, face, depth_point):
+
+        if not isinstance(depth_point, (list, tuple)) or len(depth_point) != 2:
+            return None
+
+        try:
+            depth_x = min(max(float(depth_point[0]), 0), 1)
+            depth_y = min(max(float(depth_point[1]), 0), 1)
+        except (TypeError, ValueError):
+            return None
+
+        if face.shape == "circle":
+            offset_x = depth_x - 0.5
+            offset_y = depth_y - 0.5
+            distance = (offset_x ** 2 + offset_y ** 2) ** 0.5
+
+            if distance > 0.5:
+                depth_x = 0.5 + offset_x * 0.5 / distance
+                depth_y = 0.5 + offset_y * 0.5 / distance
+
+        return [depth_x, depth_y]
 
     def point_in_polygon(
         self,
@@ -3464,6 +4098,7 @@ class VideoMapper:
                 "screen_index": scene.screen_index,
                 "space_width": scene.space_width,
                 "space_height": scene.space_height,
+                "orientation": self.get_scene_orientation(scene),
                 "faces": []
             }
 
@@ -3483,7 +4118,11 @@ class VideoMapper:
 
                     "flip_y": face.flip_y,
 
-                    "rotation_degrees": face.rotation_degrees
+                    "rotation_degrees": face.rotation_degrees,
+
+                    "shape": face.shape,
+
+                    "depth_point": face.depth_point
                 })
 
             data[
@@ -3592,6 +4231,10 @@ class VideoMapper:
                 scene_data.get(
                     "space_height",
                     default_scene_height
+                ),
+                scene_data.get(
+                    "orientation",
+                    "horizontal"
                 )
             )
 
@@ -3625,6 +4268,13 @@ class VideoMapper:
                     rotation_degrees=face_data.get(
                         "rotation_degrees",
                         0
+                    ),
+                    shape=face_data.get(
+                        "shape",
+                        "rectangle"
+                    ),
+                    depth_point=face_data.get(
+                        "depth_point"
                     )
                 )
 
@@ -3892,8 +4542,12 @@ class VideoMapper:
             data = request.get_json(silent=True) or {}
             filename = os.path.basename(data.get("filename", ""))
             mode = data.get("mode")
+            shape = data.get("shape", "rectangle")
             scene_index = data.get("scene_index")
             gallery_path = os.path.join(self.get_gallery_dir(), filename)
+
+            if shape not in ("rectangle", "circle"):
+                return jsonify({"ok": False, "error": "Forma inválida."}), 400
 
             if not filename or not os.path.isfile(gallery_path):
                 return jsonify({"ok": False, "error": "Elemento de galería inválido."}), 404
@@ -3915,7 +4569,7 @@ class VideoMapper:
                 stored_path = self.save_source_file_to_assets(gallery_path, scene)
 
                 if mode == "add":
-                    face = Face()
+                    face = Face(shape=shape)
                     offset = len(scene.faces) * 30
                     face.points = [
                         [300 + offset, 200 + offset],
@@ -4047,6 +4701,40 @@ class VideoMapper:
                 "ok": True
             })
 
+        @app.route(
+            "/api/scenes/<int:scene_index>/faces/<int:face_index>/depth",
+            methods=["POST"]
+        )
+        def web_update_face_depth(scene_index, face_index):
+
+            data = request.get_json(silent=True) or {}
+
+            with self.web_lock:
+
+                face = self.get_face_by_index(scene_index, face_index)
+
+                if face is None:
+                    return jsonify({"ok": False}), 404
+
+                if data.get("enabled", True):
+                    depth_point = self.normalize_face_depth_point(
+                        face,
+                        data.get("depth_point", [0.5, 0.25])
+                    )
+
+                    if depth_point is None:
+                        return jsonify({"ok": False}), 400
+
+                    face.depth_point = depth_point
+                else:
+                    face.depth_point = None
+
+                self.save_project(notify=False)
+
+            self.schedule_ui_refresh()
+
+            return jsonify(self.get_web_state())
+
         @app.route("/api/scenes", methods=["POST"])
         def web_add_scene():
 
@@ -4078,7 +4766,12 @@ class VideoMapper:
 
                 scene = Scene(
                     name,
-                    screen_index
+                    screen_index,
+                    orientation=data.get("orientation", "horizontal")
+                )
+
+                scene.space_width, scene.space_height = self.get_target_scene_space(
+                    scene
                 )
 
                 self.scenes.append(
@@ -4271,6 +4964,50 @@ class VideoMapper:
                 self.get_web_state()
             )
 
+        @app.route("/api/scenes/<int:index>/orientation", methods=["POST"])
+        def web_assign_scene_orientation(index):
+
+            data = request.get_json(
+                silent=True
+            ) or {}
+            orientation = data.get("orientation", "horizontal")
+
+            if orientation not in (
+                "horizontal",
+                "vertical",
+                "horizontal_inverted",
+                "vertical_inverted"
+            ):
+
+                return jsonify({
+                    "ok": False,
+                    "error": "Orientación inválida."
+                }), 400
+
+            with self.web_lock:
+
+                scene = self.get_scene_by_index(index)
+
+                if scene is None:
+
+                    return jsonify({"ok": False}), 404
+
+                previous_width, previous_height = self.get_scene_space(scene)
+                scene.orientation = orientation
+
+                self.adapt_scene_to_assigned_screen(
+                    scene,
+                    source_width=previous_width,
+                    source_height=previous_height,
+                    force=True
+                )
+
+                self.save_project(notify=False)
+
+            self.schedule_ui_refresh()
+
+            return jsonify(self.get_web_state())
+
         @app.route("/api/scenes/<int:index>/faces", methods=["POST"])
         def web_add_face(index):
 
@@ -4305,7 +5042,15 @@ class VideoMapper:
                         "ok": False
                     }), 404
 
-                face = Face()
+                shape = request.form.get("shape", "rectangle")
+
+                if shape not in ("rectangle", "circle"):
+                    return jsonify({
+                        "ok": False,
+                        "error": "Forma inválida."
+                    }), 400
+
+                face = Face(shape=shape)
 
                 offset = len(scene.faces) * 30
 
@@ -4810,12 +5555,17 @@ class VideoMapper:
                         ),
                         "flip_x": face.flip_x,
                         "flip_y": face.flip_y,
-                        "rotation_degrees": face.rotation_degrees
+                        "rotation_degrees": face.rotation_degrees,
+                        "shape": face.shape,
+                        "depth_point": face.depth_point
                     })
 
                 scenes.append({
                     "name": scene.name,
                     "screen_index": scene.screen_index,
+                    "space_width": scene.space_width,
+                    "space_height": scene.space_height,
+                    "orientation": self.get_scene_orientation(scene),
                     "faces": faces
                 })
 
@@ -4972,7 +5722,22 @@ class VideoMapper:
         self.dragging = False
         self.selected_corner = None
 
+        self.close_all_players()
+        self.player_running = False
+        self.redraw()
         self.show_edit_outputs()
+
+    def enter_edit_mode(self):
+
+        if self.web_control_active:
+
+            self.release_web_control()
+
+            return
+
+        self.exit_execution_mode()
+        self.root.deiconify()
+        self.root.lift()
 
     def stop_execution_workers(self):
 
@@ -4993,16 +5758,18 @@ class VideoMapper:
 
     def show_edit_outputs(self):
 
-        if not self.scenes:
+        if self.current_scene is None:
             return
 
-        for scene in self.scenes:
+        for scene in list(self.player_windows):
 
-            if scene not in self.player_windows:
+            if scene != self.current_scene:
 
-                self.play_scene(
-                    scene
-                )
+                self.close_scene_player(scene)
+
+        if self.current_scene not in self.player_windows:
+
+            self.play_scene(self.current_scene)
 
         self.player_running = bool(
             self.player_windows
@@ -5105,7 +5872,7 @@ class VideoMapper:
             scene
         ]
 
-        if self.execution_mode:
+        if self.execution_mode or scene == self.current_scene:
 
             threading.Thread(
                 target=self.player_render_worker,
@@ -5165,8 +5932,8 @@ class VideoMapper:
 
         while (
             not stop_event.is_set()
-            and self.execution_mode
             and player.get("running", False)
+            and (self.execution_mode or scene == self.current_scene)
         ):
 
             started_at = time.perf_counter()
@@ -5177,7 +5944,8 @@ class VideoMapper:
                     render_width,
                     render_height,
                     scene,
-                    playback=True
+                    playback=self.execution_mode,
+                    show_screen_border=not self.execution_mode
                 )
 
                 if render_width != width or render_height != height:
@@ -5191,7 +5959,13 @@ class VideoMapper:
                         interpolation=cv2.INTER_LINEAR
                     )
 
-                if stop_event.is_set() or not self.execution_mode:
+                if (
+                    stop_event.is_set()
+                    or (
+                        not self.execution_mode
+                        and scene != self.current_scene
+                    )
+                ):
                     return
 
                 player["latest_output"] = output
@@ -5209,7 +5983,8 @@ class VideoMapper:
                     return
 
             elapsed = time.perf_counter() - started_at
-            remaining = (1.0 / 30.0) - elapsed
+            target_fps = 30 if self.execution_mode else 12
+            remaining = (1.0 / target_fps) - elapsed
 
             if remaining > 0 and stop_event.wait(remaining):
                 return
@@ -5274,55 +6049,22 @@ class VideoMapper:
                 width = int(screen["width"])
                 height = int(screen["height"])
 
+            output = player.get("latest_output")
+            output_id = player.get("latest_output_id", 0)
+
             if (
-                not self.execution_mode
-                and scene != self.current_scene
+                output is None
+                or output_id == player.get("displayed_output_id")
             ):
 
-                output = np.zeros(
-                    (
-                        height,
-                        width,
-                        3
-                    ),
-                    dtype=np.uint8
+                player_window.after(
+                    16,
+                    lambda: self.player_loop(scene)
                 )
 
-            elif self.execution_mode:
+                return
 
-                output = player.get(
-                    "latest_output"
-                )
-
-                output_id = player.get(
-                    "latest_output_id",
-                    0
-                )
-
-                if (
-                    output is None
-                    or output_id == player.get("displayed_output_id")
-                ):
-
-                    player_window.after(
-                        5,
-                        lambda: self.player_loop(scene)
-                    )
-
-                    return
-
-                player["displayed_output_id"] = output_id
-
-            else:
-
-                with self.web_lock:
-
-                    output = self.render_scene(
-                        width,
-                        height,
-                        scene,
-                        playback=self.execution_mode
-                    )
+            player["displayed_output_id"] = output_id
 
             output = cv2.cvtColor(
                 output,
