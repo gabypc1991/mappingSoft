@@ -87,8 +87,63 @@ body {
   white-space: nowrap;
 }
 
+.gallery-modal-content {
+  height: 50vh;
+  min-height: 360px;
+}
+
+.gallery-modal-body {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.gallery-modal-body .tab-content {
+  min-height: 0;
+}
+
+.gallery-grid {
+  display: grid;
+  grid-template-columns: repeat(6, 520px);
+  gap: 0.5rem;
+  height: 100%;
+  padding: 0.75rem 0.25rem;
+  overflow: auto;
+}
+
+.gallery-item {
+  min-width: 0;
+  padding: 0.35rem;
+  color: #e8f6ff;
+  background: #111c2c;
+  border: 1px solid rgba(140, 212, 255, 0.2);
+  border-radius: 6px;
+}
+
+.gallery-item.selected {
+  border-color: #31d0aa;
+  box-shadow: 0 0 0 2px rgba(49, 208, 170, 0.35);
+}
+
+.gallery-item img {
+  display: block;
+  width: 520px;
+  height: 400px;
+  object-fit: contain;
+  background: #000;
+}
+
+.gallery-item span {
+  display: block;
+  overflow: hidden;
+  margin-top: 0.35rem;
+  font-size: 0.75rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 @media (max-width: 992px) {
   .stage-wrap {
     height: calc(100vh - 128px);
   }
+
 }

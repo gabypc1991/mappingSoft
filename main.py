@@ -1019,6 +1019,16 @@ class VideoMapper:
 
         tk.Button(
             self.top,
+            text="Galería",
+            command=lambda: self.open_gallery("add")
+        ).pack(
+            side="left",
+            padx=4,
+            pady=5
+        )
+
+        tk.Button(
+            self.top,
             text="Archivo",
             command=self.change_face_file
         ).pack(
@@ -1215,6 +1225,233 @@ class VideoMapper:
             "mappingSoft",
             "proyectos"
         )
+
+    def get_gallery_dir(self):
+
+        gallery_dir = os.path.join(
+            self.get_user_documents_dir(),
+            "mappingSoft",
+            "galeria"
+        )
+        os.makedirs(
+            gallery_dir,
+            exist_ok=True
+        )
+        return gallery_dir
+
+    def get_gallery_items(self):
+
+        images = []
+        animations = []
+
+        for filename in sorted(os.listdir(self.get_gallery_dir())):
+
+            path = os.path.join(self.get_gallery_dir(), filename)
+
+            if not os.path.isfile(path) or not self.is_allowed_media_file(path):
+                continue
+
+            item = {
+                "name": filename,
+                "path": path
+            }
+
+            if os.path.splitext(filename)[1].lower() in ANIMATED_IMAGE_EXTENSIONS:
+                animations.append(item)
+            else:
+                images.append(item)
+
+        return {
+            "images": images,
+            "animations": animations
+        }
+
+    def add_file_to_gallery(self, source_path):
+
+        if not self.is_allowed_media_file(source_path):
+            raise ValueError("Formato no permitido.")
+
+        filename = self.safe_upload_filename(os.path.basename(source_path))
+        target_path = os.path.join(self.get_gallery_dir(), filename)
+        base_name, extension = os.path.splitext(filename)
+        suffix = 1
+
+        while os.path.exists(target_path):
+            target_path = os.path.join(
+                self.get_gallery_dir(),
+                f"{base_name}_{suffix:02d}{extension}"
+            )
+            suffix += 1
+
+        shutil.copy2(source_path, target_path)
+        return target_path
+
+    def delete_gallery_item(self, filename):
+
+        path = os.path.join(self.get_gallery_dir(), os.path.basename(filename))
+
+        if os.path.isfile(path):
+            os.remove(path)
+
+    def open_gallery(self, mode, face=None):
+
+        if self.is_execution_mode():
+            self.warn_execution_mode()
+            return
+
+        if not self.require_project_for_desktop_action():
+            return
+
+        gallery = tk.Toplevel(self.root)
+        gallery.title("Galería")
+        gallery.transient(self.root)
+        gallery.grab_set()
+
+        screen_height = self.root.winfo_screenheight()
+        height = max(screen_height // 2, 360)
+        width = min(max(self.root.winfo_screenwidth() * 3 // 4, 720), 1100)
+        self.center_window(gallery, width, height)
+
+        selected = {"path": None, "button": None}
+        thumbnails = []
+        animated_labels = []
+
+        def select_item(path, button):
+            if selected["button"] is not None:
+                selected["button"].configure(relief="raised", bg="#2b2b2b")
+            selected["path"] = path
+            selected["button"] = button
+            button.configure(relief="sunken", bg="#2d7d8c")
+
+        def add_to_gallery():
+            source_path = filedialog.askopenfilename(
+                title="Agregar imagen o GIF",
+                filetypes=[("Imágenes y GIF", "*.png *.jpg *.jpeg *.bmp *.webp *.gif")]
+            )
+            if not source_path:
+                return
+            try:
+                self.add_file_to_gallery(source_path)
+            except Exception as error:
+                messagebox.showerror("Galería", str(error))
+                return
+            gallery.destroy()
+            self.open_gallery(mode, face)
+
+        def delete_selected():
+            if not selected["path"]:
+                return
+            self.delete_gallery_item(os.path.basename(selected["path"]))
+            gallery.destroy()
+            self.open_gallery(mode, face)
+
+        def use_selected():
+            if not selected["path"]:
+                return
+            try:
+                stored_path = self.save_source_file_to_assets(
+                    selected["path"], self.current_scene
+                )
+            except Exception as error:
+                messagebox.showerror("Galería", str(error))
+                return
+
+            if mode == "add":
+                new_face = Face()
+                offset = len(self.current_scene.faces) * 30
+                new_face.points = [
+                    [300 + offset, 200 + offset],
+                    [600 + offset, 200 + offset],
+                    [600 + offset, 500 + offset],
+                    [300 + offset, 500 + offset]
+                ]
+                self.current_scene.faces.append(new_face)
+                face_to_update = new_face
+            else:
+                face_to_update = face
+
+            face_to_update.filename = stored_path
+            face_to_update.load_file()
+            self.selected_face = face_to_update
+            self.save_project(notify=False)
+            self.redraw()
+            gallery.destroy()
+
+        notebook = ttk.Notebook(gallery)
+        notebook.pack(fill="both", expand=True, padx=8, pady=8)
+
+        def build_tab(parent, items, animated=False):
+            canvas = tk.Canvas(parent, bg="#1c1c1c", highlightthickness=0)
+            scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+            horizontal_scrollbar = ttk.Scrollbar(parent, orient="horizontal", command=canvas.xview)
+            content = tk.Frame(canvas, bg="#1c1c1c")
+            content.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
+            canvas.create_window((0, 0), window=content, anchor="nw")
+            canvas.configure(yscrollcommand=scrollbar.set, xscrollcommand=horizontal_scrollbar.set)
+            canvas.pack(side="left", fill="both", expand=True)
+            scrollbar.pack(side="right", fill="y")
+            horizontal_scrollbar.pack(side="bottom", fill="x")
+
+            for index, item in enumerate(items):
+                row, column = divmod(index, 6)
+                try:
+                    with Image.open(item["path"]) as source:
+                        preview = source.convert("RGB")
+                        preview.thumbnail((220, 180))
+                        photo = ImageTk.PhotoImage(preview)
+                except Exception:
+                    continue
+                button = tk.Button(content, image=photo, text=item["name"], compound="top", wraplength=520, bg="#2b2b2b", fg="white", command=lambda path=item["path"], button=None: None)
+                button.configure(command=lambda path=item["path"], button=button: select_item(path, button))
+                button.grid(row=row, column=column, padx=6, pady=6, sticky="n")
+                thumbnails.append(photo)
+
+                if animated:
+                    try:
+                        with Image.open(item["path"]) as source:
+                            frames = []
+                            durations = []
+                            for frame in ImageSequence.Iterator(source):
+                                preview = frame.convert("RGB")
+                                preview.thumbnail((220, 180))
+                                frames.append(ImageTk.PhotoImage(preview))
+                                durations.append(max(int(frame.info.get("duration", 100)), 40))
+                            if frames:
+                                animated_labels.append([button, frames, durations, 0])
+                                thumbnails.extend(frames)
+                    except Exception:
+                        pass
+
+            return canvas
+
+        items = self.get_gallery_items()
+        image_tab = tk.Frame(notebook, bg="#1c1c1c")
+        animation_tab = tk.Frame(notebook, bg="#1c1c1c")
+        notebook.add(image_tab, text="Imágenes")
+        notebook.add(animation_tab, text="Animaciones")
+        build_tab(image_tab, items["images"])
+        build_tab(animation_tab, items["animations"], animated=True)
+
+        def animate_previews():
+            if not gallery.winfo_exists():
+                return
+            for entry in animated_labels:
+                button, frames, durations, index = entry
+                button.configure(image=frames[index])
+                entry[3] = (index + 1) % len(frames)
+            gallery.after(100, animate_previews)
+
+        animate_previews()
+        commands = tk.Frame(gallery)
+        commands.pack(fill="x", padx=8, pady=(0, 8))
+        if mode == "add":
+            tk.Button(commands, text="+ Cara", command=use_selected).pack(side="left", padx=4)
+        else:
+            tk.Button(commands, text="Usar", command=use_selected).pack(side="left", padx=4)
+        tk.Button(commands, text="Agregar imagen o animación", command=add_to_gallery).pack(side="left", padx=4)
+        tk.Button(commands, text="Eliminar", command=delete_selected).pack(side="left", padx=4)
+        tk.Button(commands, text="Volver", command=gallery.destroy).pack(side="right", padx=4)
+        gallery._thumbnails = thumbnails
 
     def normalize_project_name(
         self,
@@ -2216,36 +2453,7 @@ class VideoMapper:
         if self.current_scene is None:
             return
 
-        face = Face()
-
-        offset = (
-            len(
-                self.current_scene.faces
-            ) * 30
-        )
-
-        face.points = [
-            [300 + offset, 200 + offset],
-            [600 + offset, 200 + offset],
-            [600 + offset, 500 + offset],
-            [300 + offset, 500 + offset]
-        ]
-
-        self.current_scene.faces.append(
-            face
-        )
-
-        self.selected_face = face
-
-        if not self.change_face_file():
-
-            self.current_scene.faces.remove(
-                face
-            )
-
-            self.selected_face = None
-
-        self.redraw()
+        self.open_gallery("add")
 
     def change_face_file(self):
 
@@ -2266,58 +2474,7 @@ class VideoMapper:
 
             return
 
-        filename = filedialog.askopenfilename(
-            title="Seleccionar imagen o GIF",
-            filetypes=[
-                (
-                    "Imágenes y GIF",
-                    "*.png *.jpg *.jpeg *.bmp "
-                    "*.webp *.gif"
-                ),
-                (
-                    "Imágenes",
-                    "*.png *.jpg *.jpeg *.bmp *.webp"
-                ),
-                (
-                    "GIF animado",
-                    "*.gif"
-                ),
-                (
-                    "Todos",
-                    "*.*"
-                )
-            ]
-        )
-
-        if not filename:
-            return False
-
-        try:
-
-            stored_path = self.save_source_file_to_assets(
-                filename,
-                self.current_scene
-            )
-
-        except Exception as e:
-
-            messagebox.showerror(
-                "Archivo",
-                str(e)
-            )
-
-            return False
-
-        face.filename = stored_path
-
-        face.load_file()
-
-        self.redraw()
-
-        self.save_project(
-            notify=False
-        )
-
+        self.open_gallery("replace", face)
         return True
 
     def delete_selected_face(self):
@@ -3671,7 +3828,7 @@ class VideoMapper:
         app
     ):
 
-        from flask import Response, jsonify, request, render_template
+        from flask import Response, jsonify, request, render_template, send_from_directory
 
         @app.route("/")
         def web_index():
@@ -3686,6 +3843,100 @@ class VideoMapper:
             return jsonify(
                 self.get_web_state()
             )
+
+        @app.route("/api/gallery")
+        def web_gallery():
+
+            return jsonify(self.get_gallery_items())
+
+        @app.route("/api/gallery/media/<path:filename>")
+        def web_gallery_media(filename):
+
+            return send_from_directory(
+                self.get_gallery_dir(),
+                os.path.basename(filename)
+            )
+
+        @app.route("/api/gallery", methods=["POST"])
+        def web_add_gallery_item():
+
+            uploaded = request.files.get("file")
+
+            if uploaded is None or not self.is_allowed_media_file(uploaded.filename):
+                return jsonify({"ok": False, "error": "Formato no permitido."}), 400
+
+            filename = self.safe_upload_filename(uploaded.filename)
+            base_name, extension = os.path.splitext(filename)
+            target_path = os.path.join(self.get_gallery_dir(), filename)
+            suffix = 1
+
+            while os.path.exists(target_path):
+                target_path = os.path.join(
+                    self.get_gallery_dir(),
+                    f"{base_name}_{suffix:02d}{extension}"
+                )
+                suffix += 1
+
+            uploaded.save(target_path)
+            return jsonify(self.get_gallery_items())
+
+        @app.route("/api/gallery/<path:filename>", methods=["DELETE"])
+        def web_delete_gallery_item(filename):
+
+            self.delete_gallery_item(filename)
+            return jsonify(self.get_gallery_items())
+
+        @app.route("/api/gallery/use", methods=["POST"])
+        def web_use_gallery_item():
+
+            data = request.get_json(silent=True) or {}
+            filename = os.path.basename(data.get("filename", ""))
+            mode = data.get("mode")
+            scene_index = data.get("scene_index")
+            gallery_path = os.path.join(self.get_gallery_dir(), filename)
+
+            if not filename or not os.path.isfile(gallery_path):
+                return jsonify({"ok": False, "error": "Elemento de galería inválido."}), 404
+
+            with self.web_lock:
+
+                if not self.ensure_current_project():
+                    return jsonify({
+                        "ok": False,
+                        "project_required": True,
+                        "error": "Debes abrir o crear un proyecto."
+                    }), 409
+
+                scene = self.get_scene_by_index(scene_index)
+
+                if scene is None:
+                    return jsonify({"ok": False}), 404
+
+                stored_path = self.save_source_file_to_assets(gallery_path, scene)
+
+                if mode == "add":
+                    face = Face()
+                    offset = len(scene.faces) * 30
+                    face.points = [
+                        [300 + offset, 200 + offset],
+                        [600 + offset, 200 + offset],
+                        [600 + offset, 500 + offset],
+                        [300 + offset, 500 + offset]
+                    ]
+                    scene.faces.append(face)
+                elif mode == "replace":
+                    face = self.get_face_by_index(scene_index, data.get("face_index"))
+                    if face is None:
+                        return jsonify({"ok": False}), 404
+                else:
+                    return jsonify({"ok": False, "error": "Acción inválida."}), 400
+
+                face.filename = stored_path
+                face.load_file()
+                self.save_project(notify=False)
+
+            self.schedule_ui_refresh()
+            return jsonify(self.get_web_state())
 
         @app.route("/api/projects")
         def web_projects():

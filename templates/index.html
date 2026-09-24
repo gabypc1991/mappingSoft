@@ -21,8 +21,7 @@
 
       <select id="screenSelect" class="form-select form-select-sm w-auto" onchange="assignScreen()"></select>
       <button class="btn btn-outline-info btn-sm toolbar-btn" onclick="rescaleScene()">Reescalar</button>
-      <button class="btn btn-info btn-sm toolbar-btn" onclick="pickFaceForNew()">+ Cara</button>
-      <input id="newFaceInput" type="file" accept="image/*,.gif" hidden onchange="addFaceFromUpload()">
+      <button class="btn btn-info btn-sm toolbar-btn" onclick="openGallery('add')">+ Cara</button>
 
       <button class="btn btn-warning btn-sm toolbar-btn" onclick="executeAll()">Ejecutar</button>
       <button class="btn btn-secondary btn-sm toolbar-btn" onclick="exitExecution()">Salir ejecucion</button>
@@ -46,7 +45,7 @@
   </main>
 
   <div id="menu" class="list-group">
-    <button class="list-group-item list-group-item-action" onclick="pickFile()">Cambiar imagen o GIF</button>
+    <button class="list-group-item list-group-item-action" onclick="openGallery('replace')">Cambiar imagen o GIF</button>
     <button class="list-group-item list-group-item-action" onclick="flipFace('x')">Invertir en X</button>
     <button class="list-group-item list-group-item-action" onclick="flipFace('y')">Invertir en Y</button>
     <button class="list-group-item list-group-item-action" onclick="rotateFace(5)">Rotar 5 grados a la izquierda</button>
@@ -55,8 +54,6 @@
     <button class="list-group-item list-group-item-action" onclick="rotateFace(-90)">Rotar 90 grados a la derecha</button>
     <button class="list-group-item list-group-item-action text-danger" onclick="deleteFace()">Eliminar cara</button>
   </div>
-
-  <input id="fileInput" type="file" accept="image/*,.gif" hidden onchange="uploadFile()">
 
   <div class="modal fade" id="projectsModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-dialog-centered">
@@ -84,6 +81,34 @@
           <button class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Cerrar</button>
           <button class="btn btn-outline-info btn-sm" onclick="openSelectedProject()">Abrir</button>
           <button class="btn btn-success btn-sm" onclick="createProject()">Crear nuevo</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal fade" id="galleryModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-centered">
+      <div class="modal-content bg-dark text-light border-secondary gallery-modal-content">
+        <div class="modal-header border-secondary">
+          <h5 class="modal-title">Galería</h5>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+        </div>
+        <div class="modal-body gallery-modal-body">
+          <ul class="nav nav-tabs" role="tablist">
+            <li class="nav-item" role="presentation"><button class="nav-link active" data-bs-toggle="tab" data-bs-target="#galleryImages" type="button">Imágenes</button></li>
+            <li class="nav-item" role="presentation"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#galleryAnimations" type="button">Animaciones</button></li>
+          </ul>
+          <div class="tab-content h-100">
+            <div class="tab-pane fade show active h-100" id="galleryImages"><div id="galleryImageGrid" class="gallery-grid"></div></div>
+            <div class="tab-pane fade h-100" id="galleryAnimations"><div id="galleryAnimationGrid" class="gallery-grid"></div></div>
+          </div>
+        </div>
+        <div class="modal-footer border-secondary">
+          <input id="galleryUploadInput" type="file" accept="image/*,.gif" hidden onchange="uploadGalleryItem()">
+          <button id="galleryUseButton" class="btn btn-success btn-sm" onclick="useGalleryItem()">+ Cara</button>
+          <button id="galleryUploadButton" class="btn btn-outline-info btn-sm" onclick="document.getElementById('galleryUploadInput').click()">Agregar imagen o animación</button>
+          <button id="galleryDeleteButton" class="btn btn-outline-danger btn-sm" onclick="deleteGalleryItem()">Eliminar</button>
+          <button class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Volver</button>
         </div>
       </div>
     </div>

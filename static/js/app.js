@@ -3,6 +3,9 @@ let selectedFace = -1;
 let dragging = -1;
 let menuFace = -1;
 let projectsModal = null;
+let galleryModal = null;
+let galleryMode = "add";
+let gallerySelection = null;
 let dragSyncInFlight = false;
 let dragSyncPending = false;
 let lastDragSyncAt = 0;
@@ -474,38 +477,6 @@ async function newScene() {
   await loadState();
 }
 
-function pickFaceForNew() {
-  document.getElementById("newFaceInput").click();
-}
-
-async function addFaceFromUpload() {
-  const input = document.getElementById("newFaceInput");
-  const file = input.files[0];
-  if (!file) {
-    return;
-  }
-
-  const fd = new FormData();
-  fd.append("file", file);
-
-  try {
-    await apiWithProjectGuard(
-      "/api/scenes/" + state.current_scene_index + "/faces",
-      {
-        method: "POST",
-        body: fd
-      }
-    );
-  } catch (e) {
-    if (e.message !== "project_required") {
-      alert(e.message || "Error subiendo archivo.");
-    }
-  }
-
-  input.value = "";
-  await loadState();
-}
-
 async function deleteScene() {
   if (!confirm("Eliminar escena?")) {
     return;
@@ -535,7 +506,7 @@ async function rescaleScene() {
 }
 
 async function addFace() {
-  pickFaceForNew();
+  await openGallery("add");
 }
 
 async function deleteFace() {
@@ -577,27 +548,95 @@ async function rotateFace(degrees) {
   await loadState();
 }
 
-function pickFile() {
-  document.getElementById("fileInput").click();
-}
-
-async function uploadFile() {
-  const file = document.getElementById("fileInput").files[0];
-  if (!file || menuFace < 0) {
+async function openGallery(mode) {
+  if (!state || state.execution_mode) {
+    return;
+  }
+  if (mode === "replace" && menuFace < 0) {
     return;
   }
 
+  galleryMode = mode;
+  gallerySelection = null;
+  document.getElementById("galleryUseButton").textContent = mode === "add" ? "+ Cara" : "Usar";
+  document.getElementById("galleryUploadButton").hidden = mode === "replace";
+  document.getElementById("galleryDeleteButton").hidden = mode === "replace";
+  await loadGallery();
+  if (!galleryModal) {
+    galleryModal = new bootstrap.Modal(document.getElementById("galleryModal"));
+  }
+  galleryModal.show();
+}
+
+function renderGalleryItems(elementId, items) {
+  const grid = document.getElementById(elementId);
+  grid.innerHTML = "";
+  items.forEach((item) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "gallery-item text-start";
+    button.innerHTML = '<img src="/api/gallery/media/' + encodeURIComponent(item.name) + '" alt=""><span></span>';
+    button.querySelector("span").textContent = item.name;
+    button.addEventListener("click", () => {
+      document.querySelectorAll(".gallery-item.selected").forEach((entry) => entry.classList.remove("selected"));
+      button.classList.add("selected");
+      gallerySelection = item.name;
+    });
+    grid.append(button);
+  });
+}
+
+async function loadGallery() {
+  const gallery = await api("/api/gallery");
+  renderGalleryItems("galleryImageGrid", gallery.images || []);
+  renderGalleryItems("galleryAnimationGrid", gallery.animations || []);
+}
+
+async function uploadGalleryItem() {
+  const input = document.getElementById("galleryUploadInput");
+  const file = input.files[0];
+  if (!file) {
+    return;
+  }
   const formData = new FormData();
   formData.append("file", file);
+  await api("/api/gallery", { method: "POST", body: formData });
+  input.value = "";
+  await loadGallery();
+}
 
-  await fetch(
-    "/api/scenes/" + state.current_scene_index + "/faces/" + menuFace + "/file",
-    {
+async function deleteGalleryItem() {
+  if (!gallerySelection) {
+    return;
+  }
+  await api("/api/gallery/" + encodeURIComponent(gallerySelection), { method: "DELETE" });
+  gallerySelection = null;
+  await loadGallery();
+}
+
+async function useGalleryItem() {
+  if (!gallerySelection) {
+    return;
+  }
+  const payload = {
+    filename: gallerySelection,
+    mode: galleryMode,
+    scene_index: state.current_scene_index
+  };
+  if (galleryMode === "replace") {
+    payload.face_index = menuFace;
+  }
+  try {
+    await apiWithProjectGuard("/api/gallery/use", {
       method: "POST",
-      body: formData
-    }
-  );
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+  } catch {
+    return;
+  }
   menu.style.display = "none";
+  galleryModal.hide();
   await loadState();
 }
 
