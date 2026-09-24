@@ -334,8 +334,11 @@ class VideoMapper:
 
         self.build_ui()
 
-        self.show_desktop_project_manager(
-            startup=True
+        self.root.after(
+            150,
+            lambda: self.show_desktop_project_manager(
+                startup=True
+            )
         )
 
         self.start_web_server(
@@ -1811,29 +1814,15 @@ class VideoMapper:
             self.root
         )
 
+        dialog.withdraw()
+
         dialog.title(
             "Proyectos"
-        )
-
-        dialog.geometry(
-            "520x380"
-        )
-
-        self.center_window(
-            dialog,
-            520,
-            380
         )
 
         dialog.configure(
             bg="#202020"
         )
-
-        dialog.transient(
-            self.root
-        )
-
-        dialog.grab_set()
 
         tk.Label(
             dialog,
@@ -1983,6 +1972,30 @@ class VideoMapper:
         )
 
         refresh_projects()
+
+        self.root.update_idletasks()
+
+        dialog_width = 520
+        dialog_height = 380
+        dialog_x = self.root.winfo_rootx() + max(
+            (self.root.winfo_width() - dialog_width) // 2,
+            0
+        )
+        dialog_y = self.root.winfo_rooty() + max(
+            (self.root.winfo_height() - dialog_height) // 2,
+            0
+        )
+
+        dialog.geometry(
+            f"{dialog_width}x{dialog_height}+{dialog_x}+{dialog_y}"
+        )
+        dialog.transient(
+            self.root
+        )
+        dialog.deiconify()
+        dialog.lift()
+        dialog.focus_force()
+        dialog.grab_set()
 
         self.root.wait_window(
             dialog
