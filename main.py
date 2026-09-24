@@ -13,17 +13,8 @@ import traceback
 
 import cv2
 import numpy as np
-from PIL import Image, ImageTk
+from PIL import Image, ImageSequence, ImageTk
 
-
-VIDEO_EXTENSIONS = (
-    ".mp4",
-    ".avi",
-    ".mov",
-    ".mkv",
-    ".webm",
-    ".m4v"
-)
 
 IMAGE_EXTENSIONS = (
     ".png",
@@ -31,6 +22,10 @@ IMAGE_EXTENSIONS = (
     ".jpeg",
     ".bmp",
     ".webp"
+)
+
+ANIMATED_IMAGE_EXTENSIONS = (
+    ".gif",
 )
 
 
@@ -83,16 +78,12 @@ class Face:
 
         self.image = None
 
-        self.video = None
-        self.video_frame = None
-        self.first_video_frame = None
-        self.video_fps = 30.0
-        self.video_frame_count = 0
+        self.gif_frames = []
+        self.gif_durations = []
+        self.gif_duration_ms = 0
+        self.is_animated = False
+
         self.playback_started_at = None
-        self.playback_frame_index = -1
-        self.playback_frame = None
-        self.playback_stop_event = None
-        self.playback_thread = None
 
         self.photo = None
 
@@ -100,8 +91,6 @@ class Face:
         self.cached_warped = None
         self.cached_mask = None
         self.cached_roi = None
-
-        self.is_video = False
 
         self.load_file()
 
@@ -111,11 +100,13 @@ class Face:
 
     def load_file(self):
 
-        self.close_video()
+        self.close_media()
 
         self.image = None
-        self.video_frame = None
-        self.first_video_frame = None
+        self.gif_frames = []
+        self.gif_durations = []
+        self.gif_duration_ms = 0
+        self.is_animated = False
 
         self.cached_warp_key = None
         self.cached_warped = None
@@ -129,9 +120,47 @@ class Face:
             self.filename
         )[1].lower()
 
-        if extension in IMAGE_EXTENSIONS:
+        if extension in ANIMATED_IMAGE_EXTENSIONS:
 
-            self.is_video = False
+            self.is_animated = True
+
+            try:
+
+                with Image.open(self.filename) as image:
+
+                    for gif_frame in ImageSequence.Iterator(image):
+
+                        rgba_frame = gif_frame.convert("RGBA")
+                        background = Image.new(
+                            "RGBA",
+                            rgba_frame.size,
+                            (0, 0, 0, 255)
+                        )
+                        background.alpha_composite(rgba_frame)
+                        frame = cv2.cvtColor(
+                            np.array(background),
+                            cv2.COLOR_RGBA2BGR
+                        )
+                        duration = max(
+                            int(gif_frame.info.get("duration", 100)),
+                            20
+                        )
+                        self.gif_frames.append(frame)
+                        self.gif_durations.append(duration)
+
+                if self.gif_frames:
+
+                    self.image = self.gif_frames[0]
+                    self.gif_duration_ms = sum(self.gif_durations)
+
+            except Exception as e:
+
+                print(
+                    "Error cargando GIF:",
+                    e
+                )
+
+        elif extension in IMAGE_EXTENSIONS:
 
             try:
 
@@ -149,380 +178,59 @@ class Face:
                     e
                 )
 
-        elif extension in VIDEO_EXTENSIONS:
-
-            self.is_video = True
-
-            try:
-
-                self.video = cv2.VideoCapture(
-                    self.filename
-                )
-
-                if not self.video.isOpened():
-
-                    print(
-                        "No se pudo abrir video:",
-                        self.filename
-                    )
-
-                    self.video = None
-
-                else:
-
-                    self.video_fps = self.video.get(
-                        cv2.CAP_PROP_FPS
-                    )
-
-                    if self.video_fps <= 0:
-                        self.video_fps = 30.0
-
-                    self.video_frame_count = int(
-                        self.video.get(cv2.CAP_PROP_FRAME_COUNT)
-                    )
-
-                    self.read_video_frame()
-
-                    if self.video_frame is not None:
-
-                        self.first_video_frame = self.video_frame.copy()
-
-            except Exception as e:
-
-                print(
-                    "Error cargando video:",
-                    e
-                )
-
     # ---------------------------------------------------------
-    # VIDEO
+    # GIF ANIMADO
     # ---------------------------------------------------------
 
-    def read_video_frame(self):
+    def start_animation(self):
 
-        if self.video is None:
-            return None
+        if self.is_animated:
 
-        ret, frame = self.video.read()
+            self.playback_started_at = time.perf_counter()
 
-        if not ret:
+    def stop_animation(self):
 
-            # Loop
-            self.video.set(
-                cv2.CAP_PROP_POS_FRAMES,
-                0
-            )
-
-            ret, frame = self.video.read()
-
-        if ret:
-
-            self.video_frame = frame
-
-            return frame
-
-        return None
-
-    def reset_playback(self):
-
-        if not self.is_video or self.video is None:
-            return
-
-        self.video.set(
-            cv2.CAP_PROP_POS_FRAMES,
-            0
-        )
-
-        self.playback_started_at = time.perf_counter()
-        self.playback_frame_index = -1
-
-    def start_playback_worker(self):
-
-        if not self.is_video or not self.filename:
-            return
-
-        self.stop_playback_worker()
-
-        stop_event = threading.Event()
-        self.playback_stop_event = stop_event
-        self.playback_frame = self.first_video_frame
-
-        self.playback_thread = threading.Thread(
-            target=self.playback_worker,
-            args=(stop_event,),
-            daemon=True
-        )
-
-        self.playback_thread.start()
-
-    def stop_playback_worker(self):
-
-        if self.playback_stop_event is not None:
-            self.playback_stop_event.set()
-
-        self.playback_stop_event = None
-        self.playback_thread = None
-        self.playback_frame = None
-
-    def playback_worker(
-        self,
-        stop_event
-    ):
-
-        capture = cv2.VideoCapture(
-            self.filename
-        )
-
-        if not capture.isOpened():
-            capture.release()
-            return
-
-        fps = capture.get(
-            cv2.CAP_PROP_FPS
-        )
-
-        if fps <= 0:
-            fps = self.video_fps or 30.0
-
-        frame_count = int(
-            capture.get(cv2.CAP_PROP_FRAME_COUNT)
-        )
-
-        started_at = time.perf_counter()
-        frame_index = -1
-        output_interval = 1.0 / min(
-            fps,
-            20.0
-        )
-        next_output_at = started_at
-
-        try:
-
-            while not stop_event.is_set():
-
-                now = time.perf_counter()
-
-                if now < next_output_at:
-
-                    if stop_event.wait(next_output_at - now):
-                        return
-
-                    now = time.perf_counter()
-
-                next_output_at = now + output_interval
-                elapsed = now - started_at
-                target_index = int(elapsed * fps)
-
-                if frame_count > 0:
-                    target_index %= frame_count
-
-                if target_index < frame_index:
-
-                    capture.set(
-                        cv2.CAP_PROP_POS_FRAMES,
-                        0
-                    )
-
-                    frame_index = -1
-
-                if target_index == frame_index:
-                    continue
-
-                frames_behind = target_index - frame_index - 1
-                max_sequential_skips = max(
-                    12,
-                    int(fps * 0.5)
-                )
-
-                if frames_behind > max_sequential_skips:
-
-                    capture.set(
-                        cv2.CAP_PROP_POS_FRAMES,
-                        target_index
-                    )
-
-                    frame_index = target_index - 1
-
-                while frame_index + 1 < target_index:
-
-                    if stop_event.is_set():
-                        return
-
-                    if not capture.grab():
-
-                        capture.set(
-                            cv2.CAP_PROP_POS_FRAMES,
-                            0
-                        )
-
-                        frame_index = -1
-                        break
-
-                    frame_index += 1
-
-                ok, frame = capture.read()
-
-                if not ok:
-
-                    capture.set(
-                        cv2.CAP_PROP_POS_FRAMES,
-                        0
-                    )
-
-                    started_at = time.perf_counter()
-                    frame_index = -1
-                    continue
-
-                frame_index = target_index
-
-                if not stop_event.is_set():
-                    self.playback_frame = frame
-
-        finally:
-
-            capture.release()
-
-    def read_video_frame_synced(self):
-
-        if self.video is None:
-            return None
-
-        if self.playback_started_at is None:
-            self.reset_playback()
-
-        elapsed = time.perf_counter() - self.playback_started_at
-        target_index = int(elapsed * self.video_fps)
-
-        if self.video_frame_count > 0:
-            target_index %= self.video_frame_count
-
-        if target_index == self.playback_frame_index:
-            return self.video_frame
-
-        if target_index < self.playback_frame_index:
-
-            self.video.set(
-                cv2.CAP_PROP_POS_FRAMES,
-                0
-            )
-
-            self.playback_frame_index = -1
-
-        frames_behind = (
-            target_index - self.playback_frame_index - 1
-        )
-
-        max_sequential_skips = max(
-            12,
-            int(self.video_fps * 0.5)
-        )
-
-        if frames_behind > max_sequential_skips:
-
-            self.video.set(
-                cv2.CAP_PROP_POS_FRAMES,
-                target_index
-            )
-
-            self.playback_frame_index = target_index - 1
-
-        while self.playback_frame_index + 1 < target_index:
-
-            if not self.video.grab():
-
-                self.video.set(
-                    cv2.CAP_PROP_POS_FRAMES,
-                    0
-                )
-
-                self.playback_frame_index = -1
-
-                break
-
-            self.playback_frame_index += 1
-
-        ret, frame = self.video.read()
-
-        if not ret:
-
-            self.reset_playback()
-
-            ret, frame = self.video.read()
-
-            target_index = 0
-
-        if ret:
-
-            self.video_frame = frame
-            self.playback_frame_index = target_index
-
-            return frame
-
-        return None
-
-    def get_first_video_frame(self):
-
-        if not self.is_video or self.video is None:
-            return None
-
-        if self.first_video_frame is not None:
-            return self.first_video_frame
-
-        current_position = self.video.get(
-            cv2.CAP_PROP_POS_FRAMES
-        )
-
-        self.video.set(
-            cv2.CAP_PROP_POS_FRAMES,
-            0
-        )
-
-        ret, frame = self.video.read()
-
-        self.video.set(
-            cv2.CAP_PROP_POS_FRAMES,
-            current_position
-        )
-
-        if ret:
-
-            self.first_video_frame = frame
-
-            return frame
-
-        return None
+        self.playback_started_at = None
 
     def get_current_frame(
         self,
         playback=False
     ):
 
-        if self.is_video:
+        if self.is_animated:
 
-            if playback:
+            if not playback or not self.gif_frames:
+                return self.image
 
-                if self.playback_frame is not None:
-                    return self.playback_frame
+            if self.playback_started_at is None:
+                self.playback_started_at = time.perf_counter()
 
-                return self.first_video_frame
+            elapsed_ms = int(
+                (time.perf_counter() - self.playback_started_at) * 1000
+            ) % self.gif_duration_ms
+            current_ms = 0
 
-            return self.get_first_video_frame()
+            for frame, duration in zip(
+                self.gif_frames,
+                self.gif_durations
+            ):
+
+                current_ms += duration
+
+                if elapsed_ms < current_ms:
+                    return frame
+
+            return self.gif_frames[-1]
 
         return self.image
 
-    def close_video(self):
+    def close_media(self):
 
-        self.stop_playback_worker()
-
-        if self.video is not None:
-
-            self.video.release()
-
-        self.video = None
-        self.video_frame = None
-        self.first_video_frame = None
         self.playback_started_at = None
-        self.playback_frame_index = -1
+        self.gif_frames = []
+        self.gif_durations = []
+        self.gif_duration_ms = 0
+        self.is_animated = False
 
         self.cached_warp_key = None
         self.cached_warped = None
@@ -554,7 +262,7 @@ class VideoMapper:
         self.root = root
 
         self.root.title(
-            "Video Mapper"
+            "GIF Mapper"
         )
 
         self.root.geometry(
@@ -624,12 +332,6 @@ class VideoMapper:
 
         self.start_web_server(
             notify=False
-        )
-
-        # Actualización de videos del editor
-        self.root.after(
-            40,
-            self.editor_video_loop
         )
 
     # =========================================================
@@ -1721,7 +1423,7 @@ class VideoMapper:
 
         return (
             extension in IMAGE_EXTENSIONS
-            or extension in VIDEO_EXTENSIONS
+            or extension in ANIMATED_IMAGE_EXTENSIONS
         )
 
     def ensure_current_project(self):
@@ -1751,7 +1453,7 @@ class VideoMapper:
     ):
 
         self.close_all_players()
-        self.close_all_videos()
+        self.close_all_media()
 
         self.set_current_project_dir(
             project_dir
@@ -2132,7 +1834,7 @@ class VideoMapper:
 
         for face in scene.faces:
 
-            face.close_video()
+            face.close_media()
 
         self.scenes.remove(
             scene
@@ -2379,10 +2081,6 @@ class VideoMapper:
             force=True
         )
 
-        self.normalize_scene_videos(
-            scene
-        )
-
         self.update_screen_combo_selection(
             scene
         )
@@ -2427,155 +2125,6 @@ class VideoMapper:
     # CARAS
     # =========================================================
 
-    def normalize_video_for_scene(
-        self,
-        source_path,
-        scene
-    ):
-
-        if not source_path or scene is None:
-            return source_path
-
-        extension = os.path.splitext(
-            source_path
-        )[1].lower()
-
-        if extension not in VIDEO_EXTENSIONS:
-            return source_path
-
-        _, max_height = self.get_target_scene_space(
-            scene
-        )
-
-        capture = cv2.VideoCapture(
-            source_path
-        )
-
-        if not capture.isOpened():
-            capture.release()
-            return source_path
-
-        source_width = int(
-            capture.get(cv2.CAP_PROP_FRAME_WIDTH)
-        )
-        source_height = int(
-            capture.get(cv2.CAP_PROP_FRAME_HEIGHT)
-        )
-
-        if (
-            source_width <= 0
-            or source_height <= 0
-            or source_height <= max_height
-        ):
-            capture.release()
-            return source_path
-
-        scale = max_height / source_height
-        target_width = max(
-            int(round(source_width * scale)),
-            2
-        )
-        target_width += target_width % 2
-        target_height = max_height - (max_height % 2)
-
-        fps = capture.get(
-            cv2.CAP_PROP_FPS
-        )
-
-        if fps <= 0:
-            fps = 30.0
-
-        base_name = os.path.splitext(
-            os.path.basename(source_path)
-        )[0]
-
-        normalized_path = os.path.join(
-            self.current_assets_dir,
-            f"{base_name}_h{target_height}.mp4"
-        )
-
-        if os.path.abspath(normalized_path) == os.path.abspath(source_path):
-            normalized_path = os.path.join(
-                self.current_assets_dir,
-                f"{base_name}_scaled.mp4"
-            )
-
-        writer = cv2.VideoWriter(
-            normalized_path,
-            cv2.VideoWriter_fourcc(*"mp4v"),
-            fps,
-            (
-                target_width,
-                target_height
-            )
-        )
-
-        if not writer.isOpened():
-            capture.release()
-            writer.release()
-            return source_path
-
-        try:
-
-            while True:
-
-                ok, frame = capture.read()
-
-                if not ok:
-                    break
-
-                resized = cv2.resize(
-                    frame,
-                    (
-                        target_width,
-                        target_height
-                    ),
-                    interpolation=cv2.INTER_AREA
-                )
-
-                writer.write(
-                    resized
-                )
-
-        finally:
-
-            capture.release()
-            writer.release()
-
-        if not os.path.isfile(normalized_path):
-            return source_path
-
-        print(
-            f"Video optimizado: {source_width}x{source_height} -> "
-            f"{target_width}x{target_height}"
-        )
-
-        return normalized_path
-
-    def normalize_scene_videos(
-        self,
-        scene
-    ):
-
-        changed = False
-
-        for face in scene.faces:
-
-            normalized_path = self.normalize_video_for_scene(
-                face.filename,
-                scene
-            )
-
-            if normalized_path == face.filename:
-                continue
-
-            face.close_video()
-            face.filename = normalized_path
-            face.load_file()
-            changed = True
-
-        return changed
-
     def save_source_file_to_assets(
         self,
         source_path,
@@ -2613,10 +2162,7 @@ class VideoMapper:
             target_path
         )
 
-        return self.normalize_video_for_scene(
-            target_path,
-            scene
-        )
+        return target_path
 
     def save_uploaded_file_to_assets(
         self,
@@ -2654,10 +2200,7 @@ class VideoMapper:
             path
         )
 
-        return self.normalize_video_for_scene(
-            path,
-            scene
-        )
+        return path
 
     def add_face(self):
 
@@ -2724,21 +2267,20 @@ class VideoMapper:
             return
 
         filename = filedialog.askopenfilename(
-            title="Seleccionar imagen o video",
+            title="Seleccionar imagen o GIF",
             filetypes=[
                 (
-                    "Imágenes y videos",
+                    "Imágenes y GIF",
                     "*.png *.jpg *.jpeg *.bmp "
-                    "*.webp *.mp4 *.avi *.mov "
-                    "*.mkv *.webm *.m4v"
+                    "*.webp *.gif"
                 ),
                 (
                     "Imágenes",
                     "*.png *.jpg *.jpeg *.bmp *.webp"
                 ),
                 (
-                    "Videos",
-                    "*.mp4 *.avi *.mov *.mkv *.webm *.m4v"
+                    "GIF animado",
+                    "*.gif"
                 ),
                 (
                     "Todos",
@@ -2809,7 +2351,7 @@ class VideoMapper:
         ):
             return
 
-        face.close_video()
+        face.close_media()
 
         self.current_scene.faces.remove(
             face
@@ -2905,7 +2447,7 @@ class VideoMapper:
         target_height=None
     ):
 
-        if face.is_video:
+        if face.is_animated:
 
             frame = face.get_current_frame(
                 playback=playback
@@ -3064,9 +2606,9 @@ class VideoMapper:
 
             # Cachea caras estáticas para evitar recalcular perspectiva cada frame.
             can_cache = (
-                (not face.is_video)
+                (not face.is_animated)
                 or
-                (face.is_video and not playback)
+                (face.is_animated and not playback)
             )
 
             destination_key = tuple(
@@ -3084,7 +2626,7 @@ class VideoMapper:
                 face.flip_x,
                 face.flip_y,
                 face.rotation_degrees,
-                face.is_video,
+                face.is_animated,
                 playback,
                 destination_key
             )
@@ -3409,17 +2951,6 @@ class VideoMapper:
                         )
 
     # =========================================================
-    # ACTUALIZAR VIDEOS DEL EDITOR
-    # =========================================================
-
-    def editor_video_loop(self):
-
-        self.root.after(
-            40,
-            self.editor_video_loop
-        )
-
-    # =========================================================
     # MOUSE
     # =========================================================
 
@@ -3483,7 +3014,7 @@ class VideoMapper:
         )
 
         menu.add_command(
-            label="Cambiar imagen o video",
+            label="Cambiar imagen o GIF",
             command=self.change_face_file
         )
 
@@ -3844,7 +3375,7 @@ class VideoMapper:
 
         self.close_all_players()
 
-        self.close_all_videos()
+        self.close_all_media()
 
         with open(
             filename,
@@ -3919,11 +3450,6 @@ class VideoMapper:
 
                 media_path = self.resolve_media_path(
                     raw_file
-                )
-
-                media_path = self.normalize_video_for_scene(
-                    media_path,
-                    scene
                 )
 
                 face = Face(
@@ -4348,7 +3874,7 @@ class VideoMapper:
 
                 for face in scene.faces:
 
-                    face.close_video()
+                    face.close_media()
 
                 self.scenes.remove(
                     scene
@@ -4440,10 +3966,6 @@ class VideoMapper:
                     force=True
                 )
 
-                self.normalize_scene_videos(
-                    scene
-                )
-
                 self.save_project(
                     notify=False
                 )
@@ -4509,7 +4031,7 @@ class VideoMapper:
 
                 return jsonify({
                     "ok": False,
-                    "error": "Debes subir una imagen o video."
+                    "error": "Debes subir una imagen o GIF."
                 }), 400
 
             with self.web_lock:
@@ -4601,7 +4123,7 @@ class VideoMapper:
                         "ok": False
                     }), 404
 
-                face.close_video()
+                face.close_media()
 
                 scene.faces.remove(
                     face
@@ -5180,7 +4702,7 @@ class VideoMapper:
 
             for face in scene.faces:
 
-                face.start_playback_worker()
+                face.start_animation()
 
         self.close_all_players()
 
@@ -5207,7 +4729,7 @@ class VideoMapper:
 
             for face in scene.faces:
 
-                face.stop_playback_worker()
+                face.stop_animation()
 
         for player in self.player_windows.values():
 
@@ -5378,18 +4900,7 @@ class VideoMapper:
             player["screen_height"]
         )
 
-        video_count = sum(
-            1
-            for face in scene.faces
-            if face.is_video
-        )
-
-        if video_count >= 3:
-            render_scale = 0.5
-        elif video_count == 2:
-            render_scale = 0.75
-        else:
-            render_scale = 1.0
+        render_scale = 1.0
 
         render_width = max(
             int(width * render_scale),
@@ -5553,8 +5064,6 @@ class VideoMapper:
 
             else:
 
-                # Serializado con web_lock: evita que el hilo del stream
-                # web lea el mismo cv2.VideoCapture al mismo tiempo.
                 with self.web_lock:
 
                     output = self.render_scene(
@@ -5724,16 +5233,16 @@ class VideoMapper:
         self.player_running = False
 
     # =========================================================
-    # CERRAR VIDEOS
+    # CERRAR MEDIOS
     # =========================================================
 
-    def close_all_videos(self):
+    def close_all_media(self):
 
         for scene in self.scenes:
 
             for face in scene.faces:
 
-                face.close_video()
+                face.close_media()
 
     # =========================================================
     # ESCAPE

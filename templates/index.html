@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Video Mapper Web</title>
+  <title>GIF Mapper Web</title>
   <link
     href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
     rel="stylesheet"
@@ -22,7 +22,7 @@
       <select id="screenSelect" class="form-select form-select-sm w-auto" onchange="assignScreen()"></select>
       <button class="btn btn-outline-info btn-sm toolbar-btn" onclick="rescaleScene()">Reescalar</button>
       <button class="btn btn-info btn-sm toolbar-btn" onclick="pickFaceForNew()">+ Cara</button>
-      <input id="newFaceInput" type="file" accept="image/*,video/*" hidden onchange="addFaceFromUpload()">
+      <input id="newFaceInput" type="file" accept="image/*,.gif" hidden onchange="addFaceFromUpload()">
 
       <button class="btn btn-warning btn-sm toolbar-btn" onclick="executeAll()">Ejecutar</button>
       <button class="btn btn-secondary btn-sm toolbar-btn" onclick="exitExecution()">Salir ejecucion</button>
@@ -46,7 +46,7 @@
   </main>
 
   <div id="menu" class="list-group">
-    <button class="list-group-item list-group-item-action" onclick="pickFile()">Cambiar imagen o video</button>
+    <button class="list-group-item list-group-item-action" onclick="pickFile()">Cambiar imagen o GIF</button>
     <button class="list-group-item list-group-item-action" onclick="flipFace('x')">Invertir en X</button>
     <button class="list-group-item list-group-item-action" onclick="flipFace('y')">Invertir en Y</button>
     <button class="list-group-item list-group-item-action" onclick="rotateFace(5)">Rotar 5 grados a la izquierda</button>
@@ -56,7 +56,7 @@
     <button class="list-group-item list-group-item-action text-danger" onclick="deleteFace()">Eliminar cara</button>
   </div>
 
-  <input id="fileInput" type="file" accept="image/*,video/*" hidden onchange="uploadFile()">
+  <input id="fileInput" type="file" accept="image/*,.gif" hidden onchange="uploadFile()">
 
   <div class="modal fade" id="projectsModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-dialog-centered">
