@@ -3147,9 +3147,39 @@ class VideoMapper:
 
         if show_screen_border:
 
-            guide_color = (255, 212, 140)
+            guide_color = (255, 255, 255)
 
             for face, guide_points in guide_faces:
+
+                polygon = np.int32(
+                    np.round(guide_points)
+                )
+                cv2.polylines(
+                    output,
+                    [polygon],
+                    True,
+                    guide_color,
+                    2,
+                    cv2.LINE_AA
+                )
+
+                for point in polygon:
+                    cv2.circle(
+                        output,
+                        tuple(point),
+                        8,
+                        (0, 0, 255),
+                        -1,
+                        cv2.LINE_AA
+                    )
+                    cv2.circle(
+                        output,
+                        tuple(point),
+                        8,
+                        guide_color,
+                        2,
+                        cv2.LINE_AA
+                    )
 
                 if face.shape == "circle":
 
@@ -3451,11 +3481,11 @@ class VideoMapper:
 
                 if face == self.selected_face:
 
-                    color = "yellow"
+                    color = "white"
 
                 else:
 
-                    color = "cyan"
+                    color = "white"
 
                 self.canvas.create_polygon(
                     points,
@@ -3505,7 +3535,7 @@ class VideoMapper:
 
                         self.canvas.create_line(
                             circle_points,
-                            fill="#8cd4ff",
+                            fill="white",
                             width=1,
                             tags="face_grid"
                         )
@@ -3518,7 +3548,7 @@ class VideoMapper:
                                 0.5 + math.cos(angle) * 0.5,
                                 0.5 + math.sin(angle) * 0.5
                             ),
-                            fill="#8cd4ff",
+                            fill="white",
                             width=1,
                             tags="face_grid"
                         )
@@ -3547,14 +3577,14 @@ class VideoMapper:
                         self.canvas.create_line(
                             top,
                             bottom,
-                            fill="#8cd4ff",
+                            fill="white",
                             width=1,
                             tags="face_grid"
                         )
                         self.canvas.create_line(
                             left,
                             right,
-                            fill="#8cd4ff",
+                            fill="white",
                             width=1,
                             tags="face_grid"
                         )

@@ -276,11 +276,11 @@ function draw() {
       }
     });
     ctx.closePath();
-    ctx.strokeStyle = index === selectedFace ? "#ffe066" : "#49ffd6";
+    ctx.strokeStyle = "#ffffff";
     ctx.lineWidth = 2;
     ctx.stroke();
 
-    ctx.strokeStyle = "#8cd4ff";
+    ctx.strokeStyle = "#ffffff";
     ctx.lineWidth = 1;
     if (face.shape === "circle") {
       const guidePoint = createProjectiveGuide(screenPoints);
@@ -345,17 +345,15 @@ function draw() {
       });
     }
 
-    if (index === selectedFace) {
-      face.points.forEach((point) => {
-        const p = toScreen(point);
-        ctx.beginPath();
-        ctx.arc(p[0], p[1], 8, 0, Math.PI * 2);
-        ctx.fillStyle = "#ff5d73";
-        ctx.fill();
-        ctx.strokeStyle = "#ffffff";
-        ctx.stroke();
-      });
-    }
+    face.points.forEach((point) => {
+      const p = toScreen(point);
+      ctx.beginPath();
+      ctx.arc(p[0], p[1], 8, 0, Math.PI * 2);
+      ctx.fillStyle = "#ff0000";
+      ctx.fill();
+      ctx.strokeStyle = "#ffffff";
+      ctx.stroke();
+    });
   });
 }
 
