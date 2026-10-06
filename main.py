@@ -16,6 +16,7 @@ import cv2
 import numpy as np
 from PIL import Image, ImageSequence, ImageTk
 
+from interactive_game import GameConfig, GameEngine, VisionBackend
 
 IMAGE_EXTENSIONS = (
     ".png",
@@ -260,6 +261,8 @@ class Scene:
         self.space_height = space_height
         self.orientation = orientation
         self.faces = []
+        self.game_config = None
+        self.game_calibration = {}
 
 
 class VideoMapper:
@@ -293,11 +296,16 @@ class VideoMapper:
         self.current_scene = None
 
         self.selected_face = None
+        self.selected_game_scene = None
 
         self.selected_corner = None
+        self.selected_game_corner = None
 
         self.dragging = False
         self.dragging_depth = False
+        self.dragging_game = False
+        self.dragging_game_move = False
+        self.game_last_drag_scene_point = None
 
         self.canvas_width = 1280
         self.canvas_height = 720
@@ -324,6 +332,22 @@ class VideoMapper:
         self.web_host_ip = "127.0.0.1"
 
         self.web_control_active = False
+
+        self.app_root_dir = os.path.dirname(os.path.abspath(__file__))
+        self.aruco_assets_dir = os.path.join(
+            self.app_root_dir,
+            "vision",
+            "aruco"
+        )
+        self.aruco_marker_cache = {}
+
+        self.game_engines = {}
+        self.vision_backend = VisionBackend(
+            project_root=self.app_root_dir
+        )
+        self.camera_debug_window = None
+        self.camera_debug_label = None
+        self.camera_debug_photo = None
 
         self.projects_root_dir = self.get_projects_root_dir()
 
@@ -711,6 +735,17 @@ class VideoMapper:
 
             face.points = scaled_points
 
+        game = getattr(scene, "game_config", None)
+
+        if game is not None:
+            scaled_game_points = []
+            for x, y in game.points:
+                scaled_game_points.append([
+                    int(round(x * sx)),
+                    int(round(y * sy))
+                ])
+            game.points = scaled_game_points
+
         scene.space_width = target_width
         scene.space_height = target_height
 
@@ -783,18 +818,17 @@ class VideoMapper:
         screen
     ):
 
-        def offset(value):
+        def absolute_offset(value):
 
-            if value >= 0:
-
-                return f"+{value}"
-
-            return str(value)
+            # Tk interpreta "-N" como distancia desde el borde derecho/inferior.
+            # Para usar coordenadas absolutas negativas en multimonitor hay que
+            # forzar el prefijo "+" y conservar el signo del número.
+            return f"+{int(value)}"
 
         return (
             f"{screen['width']}x{screen['height']}"
-            f"{offset(screen['x'])}"
-            f"{offset(screen['y'])}"
+            f"{absolute_offset(screen['x'])}"
+            f"{absolute_offset(screen['y'])}"
         )
 
     def refresh_screens(self):
@@ -1078,6 +1112,36 @@ class VideoMapper:
             self.top,
             text="+ Círculo",
             command=self.add_circular_face
+        ).pack(
+            side="left",
+            padx=4,
+            pady=5
+        )
+
+        tk.Button(
+            self.top,
+            text="+ Juego",
+            command=self.add_game_area
+        ).pack(
+            side="left",
+            padx=4,
+            pady=5
+        )
+
+        tk.Button(
+            self.top,
+            text="Config juego",
+            command=self.configure_selected_game
+        ).pack(
+            side="left",
+            padx=4,
+            pady=5
+        )
+
+        tk.Button(
+            self.top,
+            text="Cámara",
+            command=self.open_camera_debug_window
         ).pack(
             side="left",
             padx=4,
@@ -2089,6 +2153,11 @@ class VideoMapper:
         self.current_scene = scene
 
         self.selected_face = None
+        self.selected_game_scene = None
+        self.selected_game_corner = None
+        self.dragging_game = False
+        self.dragging_game_move = False
+        self.game_last_drag_scene_point = None
 
         self.update_scene_combo()
 
@@ -2140,6 +2209,8 @@ class VideoMapper:
 
             face.close_media()
 
+        self.game_engines.pop(scene, None)
+
         self.scenes.remove(
             scene
         )
@@ -2149,7 +2220,9 @@ class VideoMapper:
             self.current_scene = self.scenes[0]
 
         self.selected_face = None
+        self.selected_game_scene = None
         self.selected_corner = None
+        self.selected_game_corner = None
 
         self.update_scene_combo()
 
@@ -2747,6 +2820,718 @@ class VideoMapper:
         self.redraw()
 
     # =========================================================
+    # JUEGO INTERACTIVO
+    # =========================================================
+
+    def has_game_in_project(self):
+
+        for scene in self.scenes:
+
+            if getattr(scene, "game_config", None) is not None:
+                return True
+
+        return False
+
+    def get_selected_game_config(self):
+
+        if (
+            self.selected_game_scene is not None
+            and getattr(self.selected_game_scene, "game_config", None) is not None
+        ):
+            return self.selected_game_scene.game_config
+
+        scene = self.current_scene
+
+        if scene is None:
+            return None
+
+        return getattr(scene, "game_config", None)
+
+    def add_game_area(self):
+
+        if self.is_execution_mode():
+            self.warn_execution_mode()
+            return
+
+        if not self.require_project_for_desktop_action():
+            return
+
+        if self.current_scene is None:
+            return
+
+        if self.has_game_in_project():
+            messagebox.showinfo(
+                "Juego",
+                "Este proyecto ya tiene un juego insertado."
+            )
+            return
+
+        scene_width, scene_height = self.get_scene_space(self.current_scene)
+        center_x = scene_width * 0.5
+        center_y = scene_height * 0.5
+        half_width = scene_width * 0.26
+        half_height = scene_height * 0.25
+        points = [
+            [int(round(center_x - half_width)), int(round(center_y - half_height))],
+            [int(round(center_x + half_width)), int(round(center_y - half_height))],
+            [int(round(center_x + half_width)), int(round(center_y + half_height))],
+            [int(round(center_x - half_width)), int(round(center_y + half_height))]
+        ]
+
+        self.current_scene.game_config = GameConfig(points=points)
+        self.current_scene.game_calibration = {}
+        self.selected_face = None
+        self.selected_corner = None
+        self.dragging = False
+        self.selected_game_scene = self.current_scene
+        self.selected_game_corner = None
+        self.dragging_game = False
+        self.save_project(notify=False)
+        self.redraw()
+
+    def delete_selected_game(self):
+
+        scene = self.selected_game_scene
+
+        if scene is None:
+            scene = self.current_scene
+
+        if scene is None:
+            return
+
+        if getattr(scene, "game_config", None) is None:
+            return
+
+        if not messagebox.askyesno(
+            "Juego",
+            "¿Eliminar el juego de este proyecto?"
+        ):
+            return
+
+        scene.game_config = None
+        scene.game_calibration = {}
+        self.selected_game_scene = None
+        self.selected_game_corner = None
+        self.dragging_game = False
+        self.dragging_game_move = False
+        self.game_last_drag_scene_point = None
+        self.game_engines.pop(scene, None)
+        self.save_project(notify=False)
+        self.redraw()
+
+    def configure_selected_game(self):
+
+        if self.is_execution_mode():
+            self.warn_execution_mode()
+            return
+
+        scene = self.current_scene
+
+        if scene is None:
+            return
+
+        game = getattr(scene, "game_config", None)
+
+        if game is None:
+            messagebox.showinfo(
+                "Juego",
+                "Primero insertá un juego."
+            )
+            return
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Configuración del juego")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.configure(bg="#202020")
+
+        main = tk.Frame(dialog, bg="#202020")
+        main.pack(fill="both", expand=True, padx=12, pady=12)
+
+        for column_index in range(2):
+            main.grid_columnconfigure(column_index, weight=1)
+
+        def add_label_row(row, title):
+            tk.Label(
+                main,
+                text=title,
+                fg="white",
+                bg="#202020",
+                anchor="w"
+            ).grid(row=row, column=0, sticky="w", padx=4, pady=4)
+
+        def build_entry(row, value):
+            entry = tk.Entry(main, width=18)
+            entry.insert(0, str(value))
+            entry.grid(row=row, column=1, sticky="ew", padx=4, pady=4)
+            return entry
+
+        current_row = 0
+
+        add_label_row(current_row, "Fondo (PNG/GIF)")
+        background_label = tk.Label(
+            main,
+            text=os.path.basename(game.background_file) if game.background_file else "Sin archivo",
+            fg="#9fd7ff",
+            bg="#202020",
+            anchor="w"
+        )
+        background_label.grid(row=current_row, column=1, sticky="w", padx=4, pady=4)
+        current_row += 1
+
+        add_label_row(current_row, "Mariposa (PNG/GIF)")
+        butterfly_label = tk.Label(
+            main,
+            text=os.path.basename(game.butterfly_file) if game.butterfly_file else "Sin archivo",
+            fg="#9fd7ff",
+            bg="#202020",
+            anchor="w"
+        )
+        butterfly_label.grid(row=current_row, column=1, sticky="w", padx=4, pady=4)
+        current_row += 1
+
+        add_label_row(current_row, "Tamaño mínimo (px)")
+        min_size_entry = build_entry(current_row, game.min_butterfly_size)
+        current_row += 1
+
+        add_label_row(current_row, "Tamaño máximo (px)")
+        max_size_entry = build_entry(current_row, game.max_butterfly_size)
+        current_row += 1
+
+        add_label_row(current_row, "Orientación mariposa (°)")
+        orientation_entry = build_entry(current_row, game.butterfly_orientation_degrees)
+        current_row += 1
+
+        add_label_row(current_row, "Cantidad mínima")
+        min_count_entry = build_entry(current_row, game.min_butterfly_count)
+        current_row += 1
+
+        add_label_row(current_row, "Cantidad máxima")
+        max_count_entry = build_entry(current_row, game.max_butterfly_count)
+        current_row += 1
+
+        add_label_row(current_row, "Velocidad mínima")
+        min_speed_entry = build_entry(current_row, game.min_flee_speed)
+        current_row += 1
+
+        add_label_row(current_row, "Velocidad máxima")
+        max_speed_entry = build_entry(current_row, game.max_flee_speed)
+        current_row += 1
+
+        def normalize_camera_devices(camera_devices):
+            has_cameras = bool(camera_devices)
+
+            if not camera_devices:
+                camera_devices = [{
+                    "index": -1,
+                    "label": "Sin cámaras detectadas",
+                    "width": 0,
+                    "height": 0,
+                    "fps": 0.0
+                }]
+
+            camera_labels = [device["label"] for device in camera_devices]
+            camera_label_to_index = {
+                device["label"]: int(device["index"])
+                for device in camera_devices
+            }
+
+            return {
+                "has_cameras": has_cameras,
+                "devices": camera_devices,
+                "labels": camera_labels,
+                "label_to_index": camera_label_to_index
+            }
+
+        camera_state = normalize_camera_devices(
+            VisionBackend.list_cameras(include_details=True)
+        )
+
+        selected_camera_label = camera_state["labels"][0]
+        for device in camera_state["devices"]:
+            if int(device["index"]) == int(game.camera_index):
+                selected_camera_label = device["label"]
+                break
+
+        add_label_row(current_row, "Cámara")
+        camera_var = tk.StringVar(value=selected_camera_label)
+        camera_combo = ttk.Combobox(
+            main,
+            state="readonly",
+            values=camera_state["labels"],
+            textvariable=camera_var
+        )
+        camera_combo.set(selected_camera_label)
+        camera_combo.grid(row=current_row, column=1, sticky="ew", padx=4, pady=4)
+        current_row += 1
+
+        add_label_row(current_row, "Estado visión")
+        vision_status_label = tk.Label(
+            main,
+            text="Backend detenido",
+            fg="#ffd166",
+            bg="#202020",
+            justify="left",
+            anchor="w"
+        )
+        vision_status_label.grid(row=current_row, column=1, sticky="w", padx=4, pady=4)
+        current_row += 1
+
+        actions = tk.Frame(main, bg="#202020")
+        actions.grid(row=current_row, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        current_row += 1
+
+        def choose_background():
+            source_path = filedialog.askopenfilename(
+                title="Seleccionar fondo",
+                filetypes=[("Imágenes y GIF", "*.png *.jpg *.jpeg *.bmp *.webp *.gif")]
+            )
+            if not source_path:
+                return
+            try:
+                stored_path = self.save_source_file_to_assets(source_path, scene)
+            except Exception as error:
+                messagebox.showerror("Juego", str(error))
+                return
+            game.background_file = stored_path
+            background_label.configure(text=os.path.basename(stored_path))
+
+        def choose_butterfly():
+            source_path = filedialog.askopenfilename(
+                title="Seleccionar mariposa",
+                filetypes=[("Imágenes y GIF", "*.png *.jpg *.jpeg *.bmp *.webp *.gif")]
+            )
+            if not source_path:
+                return
+            try:
+                stored_path = self.save_source_file_to_assets(source_path, scene)
+            except Exception as error:
+                messagebox.showerror("Juego", str(error))
+                return
+            game.butterfly_file = stored_path
+            butterfly_label.configure(text=os.path.basename(stored_path))
+
+        def get_selected_camera_index():
+            label = camera_var.get()
+            label_to_index = camera_state.get("label_to_index", {})
+            if label in label_to_index:
+                return int(label_to_index[label])
+            return -1
+
+        connect_camera_button_ref = {"widget": None}
+
+        def rescan_cameras():
+            preferred_index = get_selected_camera_index()
+            if preferred_index < 0:
+                preferred_index = int(game.camera_index)
+
+            updated_state = normalize_camera_devices(
+                VisionBackend.list_cameras(include_details=True)
+            )
+            camera_state.update(updated_state)
+
+            camera_combo["values"] = camera_state["labels"]
+            selected_label = camera_state["labels"][0]
+            for device in camera_state["devices"]:
+                if int(device["index"]) == int(preferred_index):
+                    selected_label = device["label"]
+                    break
+
+            camera_var.set(selected_label)
+            camera_combo.set(selected_label)
+
+            connect_button = connect_camera_button_ref.get("widget")
+            if connect_button is not None:
+                if camera_state["has_cameras"]:
+                    connect_button.configure(state="normal")
+                else:
+                    connect_button.configure(state="disabled")
+
+        def connect_camera():
+            try:
+                camera_index = get_selected_camera_index()
+            except Exception:
+                camera_index = -1
+            if camera_index < 0:
+                messagebox.showinfo(
+                    "Cámara",
+                    "No hay cámaras conectadas en este momento."
+                )
+                return
+            game.camera_index = camera_index
+            connected = self.vision_backend.start(
+                camera_index=game.camera_index,
+                aruco_layout=game.aruco_layout
+            )
+            if connected:
+                messagebox.showinfo("Cámara", "Cámara conectada.")
+            else:
+                messagebox.showerror("Cámara", "No se pudo abrir la cámara seleccionada.")
+
+        def disconnect_camera():
+            self.vision_backend.stop()
+            messagebox.showinfo("Cámara", "Cámara desconectada.")
+
+        def refresh_vision_status():
+            if not dialog.winfo_exists():
+                return
+
+            state = self.vision_backend.get_state()
+            running = bool(state.get("running", False))
+            calibration_valid = bool(state.get("calibration_valid", False))
+            model_name = str(state.get("model_name", "N/A"))
+            detector_status = str(state.get("detector_status", "N/A"))
+            camera_error = str(state.get("camera_error", ""))
+            confidence = float(state.get("confidence", 0.0))
+            camera_index = int(state.get("camera_index", 0))
+            fps = float(state.get("fps", 0.0))
+
+            if not running:
+                text = "Backend detenido"
+                if not camera_state["has_cameras"]:
+                    text = "Backend detenido\nSin cámaras conectadas"
+                elif camera_error:
+                    text = f"Backend detenido\n{camera_error}"
+                color = "#ffd166"
+            elif calibration_valid:
+                text = (
+                    f"Conectada: cámara {camera_index} | Calibración OK\n"
+                    f"Modelo: {model_name} | {detector_status}\n"
+                    f"Conf: {confidence:.2f} | FPS: {fps:.1f}"
+                )
+                color = "#8ce99a"
+            else:
+                text = (
+                    f"Conectada: cámara {camera_index} | Calibración inválida\n"
+                    f"{detector_status}\n"
+                    f"Mostrá ARUCO 0/1/2 para habilitar la interacción"
+                )
+                color = "#ff8fab"
+
+            vision_status_label.configure(text=text, fg=color)
+            dialog.after(250, refresh_vision_status)
+
+        tk.Button(
+            actions,
+            text="Fondo",
+            command=choose_background
+        ).pack(side="left", padx=4)
+
+        tk.Button(
+            actions,
+            text="Mariposa",
+            command=choose_butterfly
+        ).pack(side="left", padx=4)
+
+        connect_camera_button = tk.Button(
+            actions,
+            text="Conectar cámara",
+            command=connect_camera
+        )
+        connect_camera_button.pack(side="left", padx=4)
+        connect_camera_button_ref["widget"] = connect_camera_button
+
+        if not camera_state["has_cameras"]:
+            connect_camera_button.configure(state="disabled")
+
+        tk.Button(
+            actions,
+            text="Desconectar cámara",
+            command=disconnect_camera
+        ).pack(side="left", padx=4)
+
+        tk.Button(
+            actions,
+            text="Reescanear cámaras",
+            command=rescan_cameras
+        ).pack(side="left", padx=4)
+
+        tk.Button(
+            actions,
+            text="Vista en vivo",
+            command=self.open_camera_debug_window
+        ).pack(side="left", padx=4)
+
+        refresh_vision_status()
+
+        confirm = tk.Frame(main, bg="#202020")
+        confirm.grid(row=current_row, column=0, columnspan=2, sticky="e", pady=(12, 0))
+
+        def save_changes():
+            try:
+                game.min_butterfly_size = int(min_size_entry.get())
+                game.max_butterfly_size = int(max_size_entry.get())
+                game.butterfly_orientation_degrees = float(orientation_entry.get())
+                game.min_butterfly_count = int(min_count_entry.get())
+                game.max_butterfly_count = int(max_count_entry.get())
+                game.min_flee_speed = float(min_speed_entry.get())
+                game.max_flee_speed = float(max_speed_entry.get())
+                selected_camera_index = int(get_selected_camera_index())
+                if selected_camera_index >= 0:
+                    game.camera_index = selected_camera_index
+                game.sanitize()
+            except ValueError:
+                messagebox.showerror(
+                    "Juego",
+                    "Verificá los valores numéricos."
+                )
+                return
+
+            self.save_project(notify=False)
+            self.redraw()
+            dialog.destroy()
+
+        tk.Button(
+            confirm,
+            text="Eliminar juego",
+            command=lambda: [self.delete_selected_game(), dialog.destroy()]
+        ).pack(side="left", padx=4)
+
+        tk.Button(
+            confirm,
+            text="Cancelar",
+            command=dialog.destroy
+        ).pack(side="left", padx=4)
+
+        tk.Button(
+            confirm,
+            text="Guardar",
+            command=save_changes
+        ).pack(side="left", padx=4)
+
+    def get_or_create_scene_engine(self, scene):
+
+        engine = self.game_engines.get(scene)
+
+        if engine is None:
+            engine = GameEngine()
+            self.game_engines[scene] = engine
+
+        return engine
+
+    def get_scene_game_baby_position(self, scene):
+
+        game = getattr(scene, "game_config", None)
+        if game is None:
+            return None
+
+        state = self.vision_backend.get_state()
+
+        if not state.get("calibration_valid"):
+            return None
+
+        normalized = state.get("baby_position")
+        if normalized is None:
+            return None
+
+        x = float(normalized[0])
+        y = float(normalized[1])
+        game_width, game_height = self.get_game_rect_size(game)
+
+        return (
+            x * game_width,
+            y * game_height
+        )
+
+    def get_game_rect_size(self, game):
+
+        matrix = cv2.getPerspectiveTransform(
+            np.float32([[0, 0], [1, 0], [1, 1], [0, 1]]),
+            np.float32(game.points)
+        )
+
+        top_right = cv2.perspectiveTransform(
+            np.float32([[[1, 0]]]),
+            matrix
+        )[0][0]
+
+        bottom_left = cv2.perspectiveTransform(
+            np.float32([[[0, 1]]]),
+            matrix
+        )[0][0]
+
+        top_left = cv2.perspectiveTransform(
+            np.float32([[[0, 0]]]),
+            matrix
+        )[0][0]
+
+        width = np.linalg.norm(top_right - top_left)
+        height = np.linalg.norm(bottom_left - top_left)
+
+        width = max(float(width), 10.0)
+        height = max(float(height), 10.0)
+
+        return width, height
+
+    def render_game_layer(
+        self,
+        output,
+        scene,
+        width,
+        height,
+        playback=False
+    ):
+
+        game = getattr(scene, "game_config", None)
+
+        if game is None:
+            return
+
+        game_width, game_height = self.get_game_rect_size(game)
+        engine = self.get_or_create_scene_engine(scene)
+        engine.configure(game, game_width, game_height)
+        baby = self.get_scene_game_baby_position(scene)
+        engine.update(baby)
+        game_frame = engine.render(playback=playback)
+
+        if game_frame is None:
+            return
+
+        editor_width, editor_height = self.get_scene_space(scene)
+        scale = min(width / editor_width, height / editor_height)
+        offset_x = (width - editor_width * scale) / 2
+        offset_y = (height - editor_height * scale) / 2
+        orientation = self.get_scene_orientation(scene)
+
+        def to_output(point):
+            x, y = point
+            if orientation in ("horizontal_inverted", "vertical_inverted"):
+                x = editor_width - x
+                y = editor_height - y
+            return [offset_x + x * scale, offset_y + y * scale]
+
+        destination_points = np.float32([to_output(point) for point in game.points])
+        polygon = np.int32(np.round(destination_points))
+        x, y, roi_width, roi_height = cv2.boundingRect(polygon)
+        x0 = max(x, 0)
+        y0 = max(y, 0)
+        x1 = min(x + roi_width, width)
+        y1 = min(y + roi_height, height)
+
+        if x1 <= x0 or y1 <= y0:
+            return
+
+        source_points = np.float32([
+            [0, 0],
+            [game_frame.shape[1] - 1, 0],
+            [game_frame.shape[1] - 1, game_frame.shape[0] - 1],
+            [0, game_frame.shape[0] - 1]
+        ])
+
+        local_destination = destination_points - np.float32([x0, y0])
+        matrix = cv2.getPerspectiveTransform(source_points, local_destination)
+
+        warped = cv2.warpPerspective(
+            game_frame,
+            matrix,
+            (x1 - x0, y1 - y0)
+        )
+
+        mask = np.zeros((y1 - y0, x1 - x0), dtype=np.uint8)
+        cv2.fillConvexPoly(mask, np.int32(np.round(local_destination)), 255)
+        valid = mask == 255
+
+        output_roi = output[y0:y1, x0:x1]
+        output_roi[valid] = warped[valid]
+
+    def find_game_at(self, x, y):
+
+        if self.current_scene is None:
+            return None
+
+        game = getattr(self.current_scene, "game_config", None)
+
+        if game is None:
+            return None
+
+        scene_x, scene_y = self.canvas_to_scene_point(
+            x,
+            y,
+            self.current_scene
+        )
+
+        if self.point_in_polygon(scene_x, scene_y, game.points):
+            return game
+
+        return None
+
+    def open_camera_debug_window(self):
+
+        if self.camera_debug_window is not None:
+            try:
+                if self.camera_debug_window.winfo_exists():
+                    self.camera_debug_window.lift()
+                    return
+            except Exception:
+                pass
+
+        self.camera_debug_window = tk.Toplevel(self.root)
+        self.camera_debug_window.title("Vista en vivo - cámara")
+        self.camera_debug_window.geometry("960x640")
+        self.camera_debug_window.configure(bg="black")
+
+        self.camera_debug_label = tk.Label(
+            self.camera_debug_window,
+            bg="black"
+        )
+        self.camera_debug_label.pack(fill="both", expand=True)
+
+        def on_close():
+            if self.camera_debug_window is not None:
+                self.camera_debug_window.destroy()
+            self.camera_debug_window = None
+            self.camera_debug_label = None
+            self.camera_debug_photo = None
+
+        self.camera_debug_window.protocol("WM_DELETE_WINDOW", on_close)
+        self.update_camera_debug_window()
+
+    def update_camera_debug_window(self):
+
+        if self.camera_debug_window is None:
+            return
+
+        try:
+            if not self.camera_debug_window.winfo_exists():
+                self.camera_debug_window = None
+                self.camera_debug_label = None
+                self.camera_debug_photo = None
+                return
+        except Exception:
+            self.camera_debug_window = None
+            self.camera_debug_label = None
+            self.camera_debug_photo = None
+            return
+
+        frame = self.vision_backend.get_debug_frame()
+
+        if frame is None:
+            placeholder = np.zeros((540, 900, 3), dtype=np.uint8)
+            cv2.putText(
+                placeholder,
+                "Sin señal de cámara. Conectá la cámara desde Config juego.",
+                (28, 52),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                (220, 220, 220),
+                2,
+                cv2.LINE_AA
+            )
+            frame = placeholder
+
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        image = Image.fromarray(rgb)
+        image.thumbnail((1280, 840))
+        photo = ImageTk.PhotoImage(image=image)
+        self.camera_debug_photo = photo
+
+        if self.camera_debug_label is not None:
+            self.camera_debug_label.configure(image=photo)
+
+        if self.camera_debug_window is not None:
+            self.camera_debug_window.after(80, self.update_camera_debug_window)
+
+    # =========================================================
     # OBTENER FRAME
     # =========================================================
 
@@ -2899,7 +3684,8 @@ class VideoMapper:
         height,
         scene=None,
         playback=False,
-        show_screen_border=False
+        show_screen_border=False,
+        show_game_guides=False
     ):
 
         output = np.zeros(
@@ -2946,6 +3732,15 @@ class VideoMapper:
                 offset_x + x * scale,
                 offset_y + y * scale
             ]
+
+        if playback:
+            self.render_game_layer(
+                output,
+                scene,
+                width,
+                height,
+                playback=playback
+            )
 
         guide_faces = []
 
@@ -3235,6 +4030,12 @@ class VideoMapper:
                         cv2.line(output, top.astype(np.int32), bottom.astype(np.int32), guide_color, 1, cv2.LINE_AA)
                         cv2.line(output, left.astype(np.int32), right.astype(np.int32), guide_color, 1, cv2.LINE_AA)
 
+            self.draw_game_guides_on_output(
+                output,
+                scene,
+                to_output
+            )
+
             cv2.rectangle(
                 output,
                 (
@@ -3247,6 +4048,14 @@ class VideoMapper:
                 ),
                 (255, 255, 255),
                 2
+            )
+
+        elif show_game_guides:
+
+            self.draw_game_guides_on_output(
+                output,
+                scene,
+                to_output
             )
 
         return output
@@ -3416,7 +4225,8 @@ class VideoMapper:
                 self.canvas_width,
                 self.canvas_height,
                 self.current_scene,
-                playback=False
+                playback=False,
+                show_game_guides=True
             )
 
         output = cv2.cvtColor(
@@ -3461,6 +4271,11 @@ class VideoMapper:
                 width=2,
                 tags="screen_border"
             )
+
+            game = getattr(self.current_scene, "game_config", None)
+
+            if game is not None:
+                pass
 
             for face in self.current_scene.faces:
 
@@ -3711,6 +4526,40 @@ class VideoMapper:
             event.y
         )
 
+        game = self.find_game_at(
+            event.x,
+            event.y
+        )
+
+        if game is not None:
+            self.selected_game_scene = self.current_scene
+            self.selected_game_corner = None
+            self.selected_face = None
+            self.selected_corner = None
+            self.dragging = False
+            self.dragging_game = False
+            self.redraw()
+
+            menu = tk.Menu(self.root, tearoff=0)
+            menu.add_command(
+                label="Configurar juego",
+                command=self.configure_selected_game
+            )
+            menu.add_command(
+                label="Abrir vista de cámara",
+                command=self.open_camera_debug_window
+            )
+            menu.add_separator()
+            menu.add_command(
+                label="Eliminar juego",
+                command=self.delete_selected_game
+            )
+            try:
+                menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                menu.grab_release()
+            return
+
         if face is None:
             return
 
@@ -3810,6 +4659,45 @@ class VideoMapper:
         if self.current_scene is None:
             return
 
+        game = getattr(self.current_scene, "game_config", None)
+
+        if (
+            game is not None
+            and self.selected_game_scene == self.current_scene
+        ):
+            for index, (x, y) in enumerate(game.points):
+                cx, cy = self.scene_to_canvas_point(
+                    x,
+                    y,
+                    self.current_scene
+                )
+                distance = ((event.x - cx) ** 2 + (event.y - cy) ** 2) ** 0.5
+                if distance < 20:
+                    self.selected_game_corner = index
+                    self.dragging_game = True
+                    self.dragging = False
+                    self.dragging_game_move = False
+                    self.game_last_drag_scene_point = None
+                    return
+
+            hit_game = self.find_game_at(event.x, event.y)
+            if hit_game is not None:
+                self.selected_game_scene = self.current_scene
+                self.selected_game_corner = None
+                self.dragging_game = True
+                self.dragging_game_move = True
+                self.dragging = False
+                self.dragging_depth = False
+                self.selected_corner = None
+                self.selected_face = None
+                self.game_last_drag_scene_point = self.canvas_to_scene_point(
+                    event.x,
+                    event.y,
+                    self.current_scene
+                )
+                self.redraw()
+                return
+
         # Buscar esquina
         if self.selected_face:
 
@@ -3860,6 +4748,9 @@ class VideoMapper:
         if face is not None:
 
             self.selected_face = face
+            self.selected_game_scene = None
+            self.selected_game_corner = None
+            self.dragging_game = False
 
             self.selected_corner = None
 
@@ -3867,9 +4758,21 @@ class VideoMapper:
 
             return
 
+        game = self.find_game_at(event.x, event.y)
+        if game is not None:
+            self.selected_game_scene = self.current_scene
+            self.selected_game_corner = None
+            self.selected_face = None
+            self.selected_corner = None
+            self.dragging_game = False
+            self.redraw()
+            return
+
         self.selected_face = None
+        self.selected_game_scene = None
 
         self.selected_corner = None
+        self.selected_game_corner = None
 
         self.redraw()
 
@@ -3880,6 +4783,44 @@ class VideoMapper:
 
         if self.is_execution_mode():
             return
+
+        if self.dragging_game and self.selected_game_scene == self.current_scene:
+
+            game = getattr(self.current_scene, "game_config", None)
+            if game is None:
+                return
+
+            scene_width, scene_height = self.get_scene_space(self.current_scene)
+            scene_x, scene_y = self.canvas_to_scene_point(
+                event.x,
+                event.y,
+                self.current_scene
+            )
+
+            if self.dragging_game_move:
+                if self.game_last_drag_scene_point is None:
+                    self.game_last_drag_scene_point = (scene_x, scene_y)
+                    return
+                dx = scene_x - self.game_last_drag_scene_point[0]
+                dy = scene_y - self.game_last_drag_scene_point[1]
+                moved = []
+                for x, y in game.points:
+                    moved.append([
+                        min(max(x + dx, 0), scene_width - 1),
+                        min(max(y + dy, 0), scene_height - 1)
+                    ])
+                game.points = moved
+                self.game_last_drag_scene_point = (scene_x, scene_y)
+                self.redraw()
+                return
+
+            if self.selected_game_corner is not None:
+                game.points[self.selected_game_corner] = [
+                    scene_x,
+                    scene_y
+                ]
+                self.redraw()
+                return
 
         if not self.dragging:
             return
@@ -3931,6 +4872,12 @@ class VideoMapper:
         if self.is_execution_mode():
             return
 
+        if self.dragging_game:
+            self.dragging_game = False
+            self.dragging_game_move = False
+            self.game_last_drag_scene_point = None
+            self.save_project(notify=False)
+
         self.dragging = False
         self.dragging_depth = False
         self.save_project(notify=False)
@@ -3949,6 +4896,271 @@ class VideoMapper:
             face.depth_point[0],
             face.depth_point[1]
         )
+
+    def get_game_normalized_scene_point(self, game, normalized_x, normalized_y):
+
+        matrix = cv2.getPerspectiveTransform(
+            np.float32([[0, 0], [1, 0], [1, 1], [0, 1]]),
+            np.float32(game.points)
+        )
+        point = cv2.perspectiveTransform(
+            np.float32([[[normalized_x, normalized_y]]]),
+            matrix
+        )[0][0]
+
+        return point[0], point[1]
+
+    def get_game_aruco_markers(self, game):
+
+        default_layout = {
+            0: [0.08, 0.08],
+            1: [0.92, 0.08],
+            2: [0.08, 0.92]
+        }
+        markers = []
+        layout = getattr(game, "aruco_layout", {}) or {}
+
+        for marker_id in (0, 1, 2):
+            marker_point = layout.get(
+                str(marker_id),
+                layout.get(marker_id, default_layout[marker_id])
+            )
+
+            if (
+                not isinstance(marker_point, (list, tuple))
+                or len(marker_point) != 2
+            ):
+                marker_point = default_layout[marker_id]
+
+            marker_x = min(max(float(marker_point[0]), 0.0), 1.0)
+            marker_y = min(max(float(marker_point[1]), 0.0), 1.0)
+            markers.append((marker_id, [marker_x, marker_y]))
+
+        return markers
+
+    def get_game_aruco_scene_quad(self, game, marker_point, half_size=0.055):
+
+        x, y = marker_point
+        corners = [
+            [x - half_size, y - half_size],
+            [x + half_size, y - half_size],
+            [x + half_size, y + half_size],
+            [x - half_size, y + half_size]
+        ]
+        scene_quad = []
+
+        for corner_x, corner_y in corners:
+            corner_x = min(max(float(corner_x), 0.0), 1.0)
+            corner_y = min(max(float(corner_y), 0.0), 1.0)
+            scene_quad.append(
+                self.get_game_normalized_scene_point(
+                    game,
+                    corner_x,
+                    corner_y
+                )
+            )
+
+        return scene_quad
+
+    def get_game_aruco_marker_path(self, marker_id):
+
+        return os.path.join(
+            self.aruco_assets_dir,
+            f"aruco_{marker_id}.png"
+        )
+
+    def get_game_aruco_marker_image(self, marker_id):
+
+        marker_path = self.get_game_aruco_marker_path(marker_id)
+
+        if not os.path.isfile(marker_path):
+            return None
+
+        marker_mtime = os.path.getmtime(marker_path)
+        cached = self.aruco_marker_cache.get(marker_id)
+
+        if (
+            cached is not None
+            and cached.get("path") == marker_path
+            and cached.get("mtime") == marker_mtime
+            and cached.get("image") is not None
+        ):
+
+            return cached["image"]
+
+        marker_image = cv2.imread(
+            marker_path,
+            cv2.IMREAD_UNCHANGED
+        )
+
+        if marker_image is None:
+            return None
+
+        if len(marker_image.shape) == 2:
+            marker_image = cv2.cvtColor(
+                marker_image,
+                cv2.COLOR_GRAY2BGR
+            )
+
+        self.aruco_marker_cache[marker_id] = {
+            "path": marker_path,
+            "mtime": marker_mtime,
+            "image": marker_image
+        }
+
+        return marker_image
+
+    def warp_image_to_quad(self, output, source_image, destination_points):
+
+        if source_image is None:
+            return False
+
+        destination_points = np.float32(destination_points)
+        polygon = np.int32(np.round(destination_points))
+
+        if polygon.shape[0] != 4:
+            return False
+
+        output_height, output_width = output.shape[:2]
+        x, y, roi_width, roi_height = cv2.boundingRect(polygon)
+        x0 = max(x, 0)
+        y0 = max(y, 0)
+        x1 = min(x + roi_width, output_width)
+        y1 = min(y + roi_height, output_height)
+
+        if x1 <= x0 or y1 <= y0:
+            return False
+
+        source_height, source_width = source_image.shape[:2]
+
+        if source_width <= 1 or source_height <= 1:
+            return False
+
+        source_points = np.float32([
+            [0, 0],
+            [source_width - 1, 0],
+            [source_width - 1, source_height - 1],
+            [0, source_height - 1]
+        ])
+
+        local_destination = destination_points - np.float32([x0, y0])
+        matrix = cv2.getPerspectiveTransform(
+            source_points,
+            local_destination
+        )
+
+        source_channels = (
+            source_image.shape[2]
+            if len(source_image.shape) > 2
+            else 1
+        )
+
+        if source_channels >= 4:
+            border_value = (0, 0, 0, 0)
+        elif source_channels == 3:
+            border_value = (0, 0, 0)
+        else:
+            border_value = 0
+
+        warped = cv2.warpPerspective(
+            source_image,
+            matrix,
+            (
+                x1 - x0,
+                y1 - y0
+            ),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=border_value
+        )
+
+        polygon_mask = np.zeros(
+            (
+                y1 - y0,
+                x1 - x0
+            ),
+            dtype=np.uint8
+        )
+        cv2.fillConvexPoly(
+            polygon_mask,
+            np.int32(np.round(local_destination)),
+            255
+        )
+
+        output_roi = output[
+            y0:y1,
+            x0:x1
+        ]
+
+        if len(warped.shape) == 2:
+            warped = cv2.cvtColor(
+                warped,
+                cv2.COLOR_GRAY2BGR
+            )
+
+        if warped.shape[2] >= 4:
+            warped_rgb = warped[:, :, :3]
+            alpha_channel = warped[:, :, 3]
+            alpha_mask = alpha_channel > 0
+            final_mask = np.logical_and(alpha_mask, polygon_mask == 255)
+        else:
+            warped_rgb = warped[:, :, :3]
+            final_mask = polygon_mask == 255
+
+        output_roi[final_mask] = warped_rgb[final_mask]
+        return True
+
+    def draw_game_guides_on_output(self, output, scene, to_output):
+
+        game = getattr(scene, "game_config", None)
+
+        if game is None:
+            return
+
+        game_points = np.float32([
+            to_output(point)
+            for point in game.points
+        ])
+        game_polygon = np.int32(
+            np.round(game_points)
+        )
+        game_guide_color = (255, 255, 0)
+
+        cv2.polylines(
+            output,
+            [game_polygon],
+            True,
+            game_guide_color,
+            2,
+            cv2.LINE_AA
+        )
+
+        marker_layout = self.get_game_aruco_markers(game)
+
+        for marker_id, marker_point in marker_layout:
+            marker_scene_quad = self.get_game_aruco_scene_quad(
+                game,
+                marker_point
+            )
+            marker_output_quad = np.float32([
+                to_output(marker_scene_point)
+                for marker_scene_point in marker_scene_quad
+            ])
+
+            marker_image = self.get_game_aruco_marker_image(marker_id)
+            marker_rendered = self.warp_image_to_quad(
+                output,
+                marker_image,
+                marker_output_quad
+            )
+
+            if not marker_rendered:
+                marker_output_polygon = np.int32(np.round(marker_output_quad))
+                cv2.fillConvexPoly(
+                    output,
+                    marker_output_polygon,
+                    (20, 20, 20)
+                )
 
     def get_face_normalized_scene_point(self, face, normalized_x, normalized_y):
 
@@ -4142,8 +5354,22 @@ class VideoMapper:
                 "space_width": scene.space_width,
                 "space_height": scene.space_height,
                 "orientation": self.get_scene_orientation(scene),
-                "faces": []
+                "faces": [],
+                "game": (
+                    scene.game_config.to_dict()
+                    if getattr(scene, "game_config", None) is not None
+                    else None
+                ),
+                "game_calibration": getattr(scene, "game_calibration", {})
             }
+
+            if scene_data["game"] is not None:
+                scene_data["game"]["background_file"] = self.media_to_stored_path(
+                    scene_data["game"].get("background_file", "")
+                )
+                scene_data["game"]["butterfly_file"] = self.media_to_stored_path(
+                    scene_data["game"].get("butterfly_file", "")
+                )
 
             for face in scene.faces:
 
@@ -4324,6 +5550,25 @@ class VideoMapper:
                 scene.faces.append(
                     face
                 )
+
+            game_data = scene_data.get("game")
+            if isinstance(game_data, dict):
+                game = GameConfig.from_dict(game_data)
+                game.background_file = self.resolve_media_path(
+                    game_data.get("background_file", "")
+                )
+                game.butterfly_file = self.resolve_media_path(
+                    game_data.get("butterfly_file", "")
+                )
+                scene.game_config = game
+            else:
+                scene.game_config = None
+
+            calibration_data = scene_data.get("game_calibration", {})
+            if isinstance(calibration_data, dict):
+                scene.game_calibration = calibration_data
+            else:
+                scene.game_calibration = {}
 
             self.scenes.append(
                 scene
@@ -5609,7 +6854,12 @@ class VideoMapper:
                     "space_width": scene.space_width,
                     "space_height": scene.space_height,
                     "orientation": self.get_scene_orientation(scene),
-                    "faces": faces
+                    "faces": faces,
+                    "game": (
+                        scene.game_config.to_dict()
+                        if getattr(scene, "game_config", None) is not None
+                        else None
+                    )
                 })
 
             return {
@@ -5747,6 +6997,13 @@ class VideoMapper:
             for face in scene.faces:
 
                 face.start_animation()
+
+            game = getattr(scene, "game_config", None)
+            if game is not None:
+                self.vision_backend.start(
+                    camera_index=game.camera_index,
+                    aruco_layout=game.aruco_layout
+                )
 
         self.close_all_players()
 
@@ -6280,6 +7537,8 @@ class VideoMapper:
 
                 face.close_media()
 
+        self.game_engines = {}
+
     # =========================================================
     # ESCAPE
     # =========================================================
@@ -6299,6 +7558,7 @@ class VideoMapper:
 
         else:
 
+            self.vision_backend.stop()
             self.root.destroy()
 
 
