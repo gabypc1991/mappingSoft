@@ -141,6 +141,8 @@ class GameConfig:
         self.safe_spawn_radius = 130.0
         self.edge_margin = 18.0
         self.camera_index = 0
+        self.detection_mode = "yolo"
+        self.tracking_marker_id = 3
         self.aruco_layout = {
             "0": [0.08, 0.08],
             "1": [0.92, 0.08],
@@ -164,6 +166,8 @@ class GameConfig:
             "safe_spawn_radius": self.safe_spawn_radius,
             "edge_margin": self.edge_margin,
             "camera_index": self.camera_index,
+            "detection_mode": self.detection_mode,
+            "tracking_marker_id": self.tracking_marker_id,
             "aruco_layout": self.aruco_layout
         }
 
@@ -186,6 +190,8 @@ class GameConfig:
         config.safe_spawn_radius = float(data.get("safe_spawn_radius", 130.0))
         config.edge_margin = float(data.get("edge_margin", 18.0))
         config.camera_index = int(data.get("camera_index", 0))
+        config.detection_mode = str(data.get("detection_mode", "yolo")).strip().lower()
+        config.tracking_marker_id = int(data.get("tracking_marker_id", 3))
         config.aruco_layout = data.get("aruco_layout", config.aruco_layout)
         config.sanitize()
         return config
@@ -202,6 +208,9 @@ class GameConfig:
         self.reaction_radius = max(self.catch_radius + 10.0, float(self.reaction_radius))
         self.safe_spawn_radius = max(self.catch_radius, float(self.safe_spawn_radius))
         self.edge_margin = max(0.0, float(self.edge_margin))
+        if self.detection_mode not in ("yolo", "opencv_aruco"):
+            self.detection_mode = "yolo"
+        self.tracking_marker_id = 3
 
 
 class Butterfly:
@@ -553,7 +562,9 @@ class VisionBackend:
             "model_name": "none",
             "running": False,
             "camera_index": 0,
-            "camera_error": ""
+            "camera_error": "",
+            "detection_mode": "yolo",
+            "tracking_marker_id": 3
         }
         self.latest_debug_frame = None
         self.homography = None
@@ -569,6 +580,8 @@ class VisionBackend:
         self.frame_counter = 0
         self.confidence = 0.0
         self.inference_ms = 0.0
+        self.detection_mode = "yolo"
+        self.tracking_marker_id = 3
         self.yolo_model = None
         self.hog_detector = None
         self.model_name = "Detector no disponible"
@@ -577,6 +590,8 @@ class VisionBackend:
         self._init_yolo_if_available()
         self.latest_state["model_name"] = self.model_name
         self.latest_state["detector_status"] = self.detector_status
+        self.latest_state["detection_mode"] = self.detection_mode
+        self.latest_state["tracking_marker_id"] = self.tracking_marker_id
 
     @staticmethod
     def _resolve_log_level(name):
@@ -777,12 +792,25 @@ class VisionBackend:
             self.model_name = "Detector no disponible"
             self.detector_status = "Error inicializando HOG"
 
-    def start(self, camera_index=0, aruco_layout=None):
+    def start(
+        self,
+        camera_index=0,
+        aruco_layout=None,
+        detection_mode="yolo",
+        tracking_marker_id=3
+    ):
         self.stop()
 
         with self.lock:
 
             self.camera_index = int(camera_index)
+            detection_mode = str(detection_mode).strip().lower()
+            if detection_mode not in ("yolo", "opencv_aruco"):
+                detection_mode = "yolo"
+            self.detection_mode = detection_mode
+            self.tracking_marker_id = max(0, int(tracking_marker_id))
+            self.latest_state["detection_mode"] = self.detection_mode
+            self.latest_state["tracking_marker_id"] = self.tracking_marker_id
 
             if isinstance(aruco_layout, dict):
                 normalized = {}
@@ -875,7 +903,7 @@ class VisionBackend:
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             aruco_centers = self._detect_aruco(rgb)
             self._update_calibration(aruco_centers)
-            self._process_detection(rgb)
+            self._process_detection(rgb, aruco_centers)
             normalized_position = self._map_position_to_game()
 
             now = time.perf_counter()
@@ -902,7 +930,9 @@ class VisionBackend:
                     "detector_status": self.detector_status,
                     "running": self.running,
                     "camera_index": self.camera_index,
-                    "camera_error": ""
+                    "camera_error": "",
+                    "detection_mode": self.detection_mode,
+                    "tracking_marker_id": self.tracking_marker_id
                 }
 
             elapsed_total = time.perf_counter() - started
@@ -961,7 +991,11 @@ class VisionBackend:
 
         self.homography = matrix
 
-    def _process_detection(self, rgb):
+    def _process_detection(self, rgb, aruco_centers):
+
+        if self.detection_mode == "opencv_aruco":
+            self._process_aruco_marker_tracking(aruco_centers)
+            return
 
         should_detect = (
             self.frame_counter % (self.detector_frame_skip + 1) == 0
@@ -1012,6 +1046,48 @@ class VisionBackend:
         else:
             alpha = 0.38
             self.smoothed_position = self.smoothed_position * (1.0 - alpha) + measured * alpha
+
+    def _process_aruco_marker_tracking(self, aruco_centers):
+
+        started = time.perf_counter()
+        marker_center = aruco_centers.get(self.tracking_marker_id)
+        self.model_name = "OpenCV ArUco"
+
+        if marker_center is None:
+            self.inference_ms = (time.perf_counter() - started) * 1000.0
+            self.detector_status = f"Esperando ARUCO {self.tracking_marker_id}"
+            self.last_bbox = None
+
+            if time.perf_counter() - self.last_detection_at > 0.9:
+                self.smoothed_position = None
+                self.confidence = 0.0
+
+            return
+
+        self.last_detection_at = time.perf_counter()
+        self.confidence = 1.0
+        self.detector_status = f"Rastreando ARUCO {self.tracking_marker_id}"
+        measured = np.array([
+            float(marker_center[0]),
+            float(marker_center[1])
+        ], dtype=np.float32)
+
+        if self.smoothed_position is None:
+            self.smoothed_position = measured
+        else:
+            alpha = 0.45
+            self.smoothed_position = (
+                self.smoothed_position * (1.0 - alpha)
+                + measured * alpha
+            )
+
+        self.last_bbox = [
+            float(measured[0] - 24.0),
+            float(measured[1] - 24.0),
+            48.0,
+            48.0
+        ]
+        self.inference_ms = (time.perf_counter() - started) * 1000.0
 
     def _detect_with_yolo(self, rgb):
 
@@ -1138,6 +1214,12 @@ class VisionBackend:
             f"Confidence: {self.confidence:.2f}",
             f"FPS: {fps:.1f}",
             f"Inference: {self.inference_ms:.1f} ms",
+            f"Mode: {self.detection_mode}",
+            (
+                f"Tracking ARUCO: {self.tracking_marker_id}"
+                if self.detection_mode == "opencv_aruco"
+                else "Tracking ARUCO: OFF"
+            ),
             f"Model: {self.model_name}",
             f"Calibration: {'OK' if self.homography is not None else 'INVALID'}"
         ]

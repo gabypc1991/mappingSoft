@@ -3065,6 +3065,39 @@ class VideoMapper:
         camera_combo.grid(row=current_row, column=1, sticky="ew", padx=4, pady=4)
         current_row += 1
 
+        detection_mode_values = {
+            "YOLO / Persona": "yolo",
+            "OpenCV ArUco (ID 3)": "opencv_aruco"
+        }
+        detection_mode_reverse_values = {
+            value: key
+            for key, value in detection_mode_values.items()
+        }
+        game_detection_mode = str(
+            getattr(game, "detection_mode", "yolo")
+        ).strip().lower()
+        if game_detection_mode not in detection_mode_reverse_values:
+            game_detection_mode = "yolo"
+
+        add_label_row(current_row, "Modo detección")
+        detection_mode_var = tk.StringVar(
+            value=detection_mode_reverse_values[game_detection_mode]
+        )
+        detection_mode_combo = ttk.Combobox(
+            main,
+            state="readonly",
+            values=list(detection_mode_values.keys()),
+            textvariable=detection_mode_var
+        )
+        detection_mode_combo.grid(
+            row=current_row,
+            column=1,
+            sticky="ew",
+            padx=4,
+            pady=4
+        )
+        current_row += 1
+
         add_label_row(current_row, "Estado visión")
         vision_status_label = tk.Label(
             main,
@@ -3118,6 +3151,10 @@ class VideoMapper:
                 return int(label_to_index[label])
             return -1
 
+        def get_selected_detection_mode():
+            label = detection_mode_var.get()
+            return detection_mode_values.get(label, "yolo")
+
         connect_camera_button_ref = {"widget": None}
 
         def rescan_cameras():
@@ -3147,6 +3184,33 @@ class VideoMapper:
                 else:
                     connect_button.configure(state="disabled")
 
+        def regenerate_aruco_files():
+            try:
+                saved_paths = self.regenerate_aruco_marker_files(
+                    marker_ids=(0, 1, 2, 3),
+                    size_px=1024,
+                    white_border_px=164
+                )
+            except Exception as error:
+                messagebox.showerror(
+                    "ArUco",
+                    str(error)
+                )
+                return
+
+            self.redraw()
+
+            if self.player_windows and not self.execution_mode:
+                self.show_edit_outputs()
+
+            messagebox.showinfo(
+                "ArUco",
+                (
+                    "Marcadores regenerados:\n"
+                    + "\n".join(saved_paths)
+                )
+            )
+
         def connect_camera():
             try:
                 camera_index = get_selected_camera_index()
@@ -3159,9 +3223,13 @@ class VideoMapper:
                 )
                 return
             game.camera_index = camera_index
+            game.detection_mode = get_selected_detection_mode()
+            game.tracking_marker_id = 3
             connected = self.vision_backend.start(
                 camera_index=game.camera_index,
-                aruco_layout=game.aruco_layout
+                aruco_layout=game.aruco_layout,
+                detection_mode=get_selected_detection_mode(),
+                tracking_marker_id=getattr(game, "tracking_marker_id", 3)
             )
             if connected:
                 messagebox.showinfo("Cámara", "Cámara conectada.")
@@ -3185,6 +3253,8 @@ class VideoMapper:
             confidence = float(state.get("confidence", 0.0))
             camera_index = int(state.get("camera_index", 0))
             fps = float(state.get("fps", 0.0))
+            detection_mode = str(state.get("detection_mode", "yolo"))
+            tracking_marker_id = int(state.get("tracking_marker_id", 3))
 
             if not running:
                 text = "Backend detenido"
@@ -3196,6 +3266,7 @@ class VideoMapper:
             elif calibration_valid:
                 text = (
                     f"Conectada: cámara {camera_index} | Calibración OK\n"
+                    f"Modo: {detection_mode}\n"
                     f"Modelo: {model_name} | {detector_status}\n"
                     f"Conf: {confidence:.2f} | FPS: {fps:.1f}"
                 )
@@ -3203,6 +3274,8 @@ class VideoMapper:
             else:
                 text = (
                     f"Conectada: cámara {camera_index} | Calibración inválida\n"
+                    f"Modo: {detection_mode}"
+                    f" | ARUCO bebé: {tracking_marker_id}\n"
                     f"{detector_status}\n"
                     f"Mostrá ARUCO 0/1/2 para habilitar la interacción"
                 )
@@ -3221,6 +3294,12 @@ class VideoMapper:
             actions,
             text="Mariposa",
             command=choose_butterfly
+        ).pack(side="left", padx=4)
+
+        tk.Button(
+            actions,
+            text="Regenerar ArUco",
+            command=regenerate_aruco_files
         ).pack(side="left", padx=4)
 
         connect_camera_button = tk.Button(
@@ -3269,6 +3348,8 @@ class VideoMapper:
                 selected_camera_index = int(get_selected_camera_index())
                 if selected_camera_index >= 0:
                     game.camera_index = selected_camera_index
+                game.detection_mode = get_selected_detection_mode()
+                game.tracking_marker_id = 3
                 game.sanitize()
             except ValueError:
                 messagebox.showerror(
@@ -4968,6 +5049,97 @@ class VideoMapper:
             self.aruco_assets_dir,
             f"aruco_{marker_id}.png"
         )
+
+    def regenerate_aruco_marker_files(
+        self,
+        marker_ids=(0, 1, 2, 3),
+        size_px=1024,
+        white_border_px=None
+    ):
+
+        if not hasattr(cv2, "aruco"):
+            raise RuntimeError(
+                "OpenCV no incluye módulo aruco en este entorno."
+            )
+
+        os.makedirs(
+            self.aruco_assets_dir,
+            exist_ok=True
+        )
+
+        dictionary = cv2.aruco.getPredefinedDictionary(
+            cv2.aruco.DICT_4X4_50
+        )
+        if white_border_px is None:
+            # Borde blanco grueso (quiet zone) integrado en la imagen.
+            white_border_px = max(int(size_px * 0.16), 48)
+        else:
+            white_border_px = max(int(white_border_px), 0)
+
+        saved_paths = []
+
+        for marker_id in marker_ids:
+            marker_id = int(marker_id)
+            if marker_id < 0:
+                continue
+
+            if hasattr(cv2.aruco, "generateImageMarker"):
+                marker_core = cv2.aruco.generateImageMarker(
+                    dictionary,
+                    marker_id,
+                    int(size_px)
+                )
+            elif hasattr(cv2.aruco, "drawMarker"):
+                marker_core = np.zeros(
+                    (
+                        int(size_px),
+                        int(size_px)
+                    ),
+                    dtype=np.uint8
+                )
+                cv2.aruco.drawMarker(
+                    dictionary,
+                    marker_id,
+                    int(size_px),
+                    marker_core,
+                    1
+                )
+            else:
+                raise RuntimeError(
+                    "Este OpenCV no soporta generación de marcadores ArUco."
+                )
+
+            marker_image = np.full(
+                (
+                    int(size_px) + white_border_px * 2,
+                    int(size_px) + white_border_px * 2
+                ),
+                255,
+                dtype=np.uint8
+            )
+            marker_image[
+                white_border_px:white_border_px + int(size_px),
+                white_border_px:white_border_px + int(size_px)
+            ] = marker_core
+
+            marker_path = self.get_game_aruco_marker_path(marker_id)
+            written = cv2.imwrite(
+                marker_path,
+                marker_image
+            )
+
+            if not written:
+                raise RuntimeError(
+                    f"No se pudo guardar {os.path.basename(marker_path)}"
+                )
+
+            self.aruco_marker_cache.pop(
+                marker_id,
+                None
+            )
+            saved_paths.append(marker_path)
+
+        return saved_paths
 
     def get_game_aruco_marker_image(self, marker_id):
 
@@ -7002,7 +7174,9 @@ class VideoMapper:
             if game is not None:
                 self.vision_backend.start(
                     camera_index=game.camera_index,
-                    aruco_layout=game.aruco_layout
+                    aruco_layout=game.aruco_layout,
+                    detection_mode=getattr(game, "detection_mode", "yolo"),
+                    tracking_marker_id=getattr(game, "tracking_marker_id", 3)
                 )
 
         self.close_all_players()
